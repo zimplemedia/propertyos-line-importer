@@ -9,13 +9,34 @@ const decodeCursor = (s) => {
   }
 };
 
+// One-entry cache of the current contacts page. A batch returns ≤25 chats but a page holds 100,
+// so consecutive scrapeOam calls land on the same pageToken — without this, each page is
+// re-fetched once per batch (~4×). Module state dies with the MV3 service worker; the fallback
+// is just a re-fetch. Also pins offset-resume to one snapshot of the DISPLAY_NAME-sorted list.
+let contactsPageCache = null; // { key, list, next }
+
+export function resetContactsPageCache() {
+  contactsPageCache = null;
+}
+
+async function getContactsPage(botId, pageToken) {
+  const key = `${botId}:${pageToken || ''}`;
+  if (contactsPageCache?.key !== key) {
+    const { list, next } = await fetchContactsPage(botId, pageToken);
+    contactsPageCache = { key, list, next };
+  }
+  return contactsPageCache;
+}
+
 /**
  * Scrape one bounded batch of the OA's chats. The returned cursor fully encodes resume position
  * ({ botId, pageToken, offset }) so the MV3 worker can be killed between calls. `pageToken` is the
  * OAM `next` token that FETCHES the current contacts page (undefined = first page); `offset` is how
  * many chatExists contacts of that page were already returned.
  */
-export async function scrapeOam({ basicId, cursor, maxContacts = 25, maxBytes = 1_500_000 }) {
+// maxBytes is the binding bound (batches of fat chats close early and resume via the offset
+// cursor); maxContacts is just the ceiling for pages of small chats.
+export async function scrapeOam({ basicId, cursor, maxContacts = 100, maxBytes = 1_500_000 }) {
   try {
     const state = cursor ? decodeCursor(cursor) : null;
     let botId = state?.botId;
@@ -23,18 +44,24 @@ export async function scrapeOam({ basicId, cursor, maxContacts = 25, maxBytes = 
     const offset = state?.offset || 0;
     if (!botId) botId = await resolveOamBotId(basicId);
 
-    const { list, next } = await fetchContactsPage(botId, pageToken);
+    const { list, next } = await getContactsPage(botId, pageToken);
     const chats = (list || []).filter((c) => c.chatExists);
 
+    // Download CSVs in small concurrent waves (instead of one-at-a-time) to cut per-batch wait.
+    // Each wave is a contiguous slice so `offset` advances correctly for the resumable cursor.
+    const POOL = 6;
     const contacts = [];
     let bytes = 0;
     let i = offset;
-    for (; i < chats.length; i++) {
-      if (contacts.length >= maxContacts || bytes >= maxBytes) break; // always ≥1 (checked after first push)
-      const c = chats[i];
-      const csv = await downloadChatCsv(botId, c.contactId);
-      bytes += csv.length;
-      contacts.push({ chatId: c.contactId, name: c.profile?.name || '', iconHash: c.profile?.iconHash || null, csv });
+    while (i < chats.length && contacts.length < maxContacts && bytes < maxBytes) {
+      const waveSize = Math.min(POOL, maxContacts - contacts.length, chats.length - i);
+      const wave = chats.slice(i, i + waveSize);
+      const csvs = await Promise.all(wave.map((c) => downloadChatCsv(botId, c.contactId)));
+      wave.forEach((c, j) => {
+        bytes += csvs[j].length;
+        contacts.push({ chatId: c.contactId, name: c.profile?.name || '', iconHash: c.profile?.iconHash || null, csv: csvs[j] });
+      });
+      i += waveSize;
     }
 
     const pageDone = i >= chats.length;

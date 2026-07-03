@@ -1,4 +1,4 @@
-import { test, expect, mock } from 'bun:test';
+import { test, expect, mock, beforeEach } from 'bun:test';
 
 function mockApi({ botId = 'Ubot', pages }) {
   // pages: keyed by pageToken ('__first__' for the initial page) → { list, next }
@@ -8,6 +8,11 @@ function mockApi({ botId = 'Ubot', pages }) {
     downloadChatCsv: async (_b, chatId) => `csv-${chatId}`,
   }));
 }
+
+beforeEach(async () => {
+  const { resetContactsPageCache } = await import('../src/scrape.js');
+  resetContactsPageCache();
+});
 
 test('single full page → done, all contacts, cursor null', async () => {
   mockApi({
@@ -66,6 +71,35 @@ test('advances across pages via next token', async () => {
   expect(second.done).toBe(true);
 });
 
+test('downloads CSVs concurrently within a batch while preserving order', async () => {
+  let inFlight = 0;
+  let maxInFlight = 0;
+  mock.module('../src/oam-api.js', () => ({
+    resolveOamBotId: async () => 'Ubot',
+    fetchContactsPage: async () => ({
+      list: [
+        { contactId: 'a', chatExists: true, profile: {} },
+        { contactId: 'b', chatExists: true, profile: {} },
+        { contactId: 'c', chatExists: true, profile: {} },
+        { contactId: 'd', chatExists: true, profile: {} },
+      ],
+      next: null,
+    }),
+    downloadChatCsv: async (_b, chatId) => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 5));
+      inFlight--;
+      return `csv-${chatId}`;
+    },
+  }));
+  const { scrapeOam } = await import('../src/scrape.js');
+  const r = await scrapeOam({ basicId: '@x', maxContacts: 25 });
+  expect(r.contacts.map((c) => c.chatId)).toEqual(['a', 'b', 'c', 'd']); // order preserved
+  expect(r.contacts[0].csv).toBe('csv-a');
+  expect(maxInFlight).toBeGreaterThan(1); // ran in parallel, not one-at-a-time
+});
+
 test('maps a cookie-expiry error to the contract shape', async () => {
   mock.module('../src/oam-api.js', () => ({
     resolveOamBotId: async () => {
@@ -77,4 +111,30 @@ test('maps a cookie-expiry error to the contract shape', async () => {
   const { scrapeOam } = await import('../src/scrape.js');
   const r = await scrapeOam({ basicId: '@x' });
   expect(r).toEqual({ ok: false, error: 'LINE_OAM_COOKIE_INVALID' });
+});
+
+test('reuses the cached contacts page across batch calls (one fetch per page)', async () => {
+  let pageFetches = 0;
+  mock.module('../src/oam-api.js', () => ({
+    resolveOamBotId: async () => 'Ubot',
+    fetchContactsPage: async () => {
+      pageFetches++;
+      return {
+        list: [
+          { contactId: 'a', chatExists: true, profile: {} },
+          { contactId: 'b', chatExists: true, profile: {} },
+          { contactId: 'c', chatExists: true, profile: {} },
+        ],
+        next: null,
+      };
+    },
+    downloadChatCsv: async (_b, chatId) => `csv-${chatId}`,
+  }));
+  const { scrapeOam } = await import('../src/scrape.js');
+  const first = await scrapeOam({ basicId: '@x', maxContacts: 2 });
+  const second = await scrapeOam({ basicId: '@x', cursor: first.cursor, maxContacts: 2 });
+  expect(first.contacts.map((c) => c.chatId)).toEqual(['a', 'b']);
+  expect(second.contacts.map((c) => c.chatId)).toEqual(['c']);
+  expect(second.done).toBe(true);
+  expect(pageFetches).toBe(1); // page of 100 fetched once, not once per 25-batch
 });
