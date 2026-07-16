@@ -2,6 +2,18 @@ import { resolveOamBotId, fetchContactsPage, downloadChatCsv, fetchChatMembers }
 
 const isGroup = (c) => !!c.profile?.groupId;
 
+// Mirrors the server's oamChatState picker: chat-state flags only — name/photo/ids have
+// first-class homes on the Contact row and must not get a second, staler copy here.
+const oamChatState = (c) => ({
+  chatAvailable: c.chatAvailable ?? null,
+  friend: c.friend ?? null,
+  done: c.done ?? null,
+  followedUp: c.followedUp ?? null,
+  spam: c.spam ?? null,
+  useManualChat: c.useManualChat ?? null,
+  lastTalkedAt: c.lastTalkedAt ?? null,
+});
+
 const encodeCursor = (obj) => btoa(JSON.stringify(obj));
 const decodeCursor = (s) => {
   try {
@@ -68,6 +80,7 @@ export async function scrapeOam({ basicId, cursor, maxContacts = 100, maxBytes =
           iconHash: c.profile?.iconHash || null,
           csv: csvs[j],
           type: isGroup(c) ? 'GROUP' : 'USER',
+          metadata: oamChatState(c),
         };
         if (isGroup(c)) {
           entry.members = memberLists[j];

@@ -147,6 +147,29 @@ test('tags USER/GROUP and fetches members for group contacts', async () => {
   expect(membersFetchedFor).toBe('g1');
 });
 
+test('picks the chat-state flags into metadata, dropping profile/contactId/chatExists/tagIds', async () => {
+  mock.module('../src/oam-api.js', () => ({
+    resolveOamBotId: async () => 'Ubot',
+    fetchContactsPage: async () => ({
+      list: [
+        {
+          contactId: 'a', chatExists: true, profile: { name: 'A', iconHash: 'ha' }, tagIds: ['t1'],
+          chatAvailable: false, friend: true, done: false, followedUp: true, spam: false,
+          useManualChat: false, lastTalkedAt: 1773989221078,
+        },
+      ],
+      next: null,
+    }),
+    downloadChatCsv: async (_b, chatId) => `csv-${chatId}`,
+  }));
+  const { scrapeOam } = await import('../src/scrape.js');
+  const r = await scrapeOam({ basicId: '@x' });
+  expect(r.contacts[0].metadata).toEqual({
+    chatAvailable: false, friend: true, done: false, followedUp: true,
+    spam: false, useManualChat: false, lastTalkedAt: 1773989221078,
+  });
+});
+
 test('reuses the cached contacts page across batch calls (one fetch per page)', async () => {
   let pageFetches = 0;
   mock.module('../src/oam-api.js', () => ({
