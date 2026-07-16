@@ -33,6 +33,18 @@ test('downloadChatCsv returns text; 401 throws LINE_OAM_COOKIE_INVALID', async (
   await expect(downloadChatCsv('Ub', 'c1')).rejects.toThrow('LINE_OAM_COOKIE_INVALID');
 });
 
+test('oamFetch retries a rejected fetch (network drop) then succeeds', async () => {
+  const { downloadChatCsv } = await import('../src/oam-api.js');
+  let calls = 0;
+  global.fetch = async () => {
+    calls++;
+    if (calls === 1) throw new TypeError('Failed to fetch'); // e.g. net::ERR_NETWORK_CHANGED
+    return new Response('Sender type,ok', { status: 200 });
+  };
+  expect(await downloadChatCsv('Ub', 'c1')).toContain('Sender type');
+  expect(calls).toBe(2); // dropped once, retried, recovered
+});
+
 test('fetch sends credentials:include and no Cookie header', async () => {
   const { fetchContactsPage } = await import('../src/oam-api.js');
   let opts;

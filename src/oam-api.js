@@ -8,7 +8,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function oamFetch(path, { accept } = {}, { maxRetries = 4, baseDelayMs = 500 } = {}) {
   const headers = { ...HEADERS, ...(accept ? { Accept: accept } : {}) };
   for (let attempt = 0; ; attempt++) {
-    const res = await fetch(BASE + path, { credentials: 'include', headers });
+    let res;
+    try {
+      res = await fetch(BASE + path, { credentials: 'include', headers });
+    } catch (e) {
+      // A REJECTED fetch is a transient network drop (net::ERR_NETWORK_CHANGED on a WiFi/VPN switch,
+      // a brief offline blip) — not an HTTP status, so it never reaches the RETRYABLE check below.
+      // Back off and retry; only surface it once the attempts are spent.
+      if (attempt < maxRetries) {
+        await sleep(baseDelayMs * 2 ** attempt + Math.random() * baseDelayMs);
+        continue;
+      }
+      throw new Error(`LINE_NETWORK_ERROR: ${path} ${String(e?.message || e).slice(0, 120)}`);
+    }
     if (res.status === 401 || res.status === 403) throw new Error('LINE_OAM_COOKIE_INVALID');
     if (res.ok) return res;
     if (RETRYABLE.has(res.status) && attempt < maxRetries) {
