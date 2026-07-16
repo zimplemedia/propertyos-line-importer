@@ -1,4 +1,6 @@
-import { resolveOamBotId, fetchContactsPage, downloadChatCsv } from './oam-api.js';
+import { resolveOamBotId, fetchContactsPage, downloadChatCsv, fetchChatMembers } from './oam-api.js';
+
+const isGroup = (c) => !!c.profile?.groupId;
 
 const encodeCursor = (obj) => btoa(JSON.stringify(obj));
 const decodeCursor = (s) => {
@@ -57,9 +59,23 @@ export async function scrapeOam({ basicId, cursor, maxContacts = 100, maxBytes =
       const waveSize = Math.min(POOL, maxContacts - contacts.length, chats.length - i);
       const wave = chats.slice(i, i + waveSize);
       const csvs = await Promise.all(wave.map((c) => downloadChatCsv(botId, c.contactId)));
+      const memberLists = await Promise.all(wave.map((c) => (isGroup(c) ? fetchChatMembers(botId, c.contactId) : null)));
       wave.forEach((c, j) => {
         bytes += csvs[j].length;
-        contacts.push({ chatId: c.contactId, name: c.profile?.name || '', iconHash: c.profile?.iconHash || null, csv: csvs[j] });
+        const entry = {
+          chatId: c.contactId,
+          name: c.profile?.name || '',
+          iconHash: c.profile?.iconHash || null,
+          csv: csvs[j],
+          type: isGroup(c) ? 'GROUP' : 'USER',
+        };
+        if (isGroup(c)) {
+          entry.members = memberLists[j];
+          if (c.profile?.count && memberLists[j].length < c.profile.count) {
+            console.warn(`[scrape] group ${c.contactId}: fetched ${memberLists[j].length}/${c.profile.count} members`);
+          }
+        }
+        contacts.push(entry);
       });
       i += waveSize;
     }

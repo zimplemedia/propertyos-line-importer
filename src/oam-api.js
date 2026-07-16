@@ -53,6 +53,22 @@ export async function fetchContactsPage(botId, pageToken) {
   return { list: data.list || [], next: data.next || null };
 }
 
+// Group roster (excludes the OA host side), paged via `next` like /contacts so big groups are
+// complete by construction. iconHash per member is what lets the server photo-match members.
+export async function fetchChatMembers(botId, chatId) {
+  const all = [];
+  let next;
+  do {
+    const qs = new URLSearchParams({ limit: '100' });
+    if (next) qs.set('next', next);
+    const res = await oamFetch(`/api/v1/bots/${botId}/chats/${chatId}/members?${qs.toString()}`);
+    const data = await res.json();
+    all.push(...(data.list || []));
+    next = data.next || null;
+  } while (next);
+  return all.map((m) => ({ userId: m.userId, name: m.name || '', iconHash: m.iconHash || null }));
+}
+
 export async function downloadChatCsv(botId, chatId, { timezoneOffset = -420 } = {}) {
   const res = await oamFetch(`/download/${botId}/${chatId}/messages.csv?timezoneOffset=${timezoneOffset}`, {
     accept: 'text/csv,*/*',

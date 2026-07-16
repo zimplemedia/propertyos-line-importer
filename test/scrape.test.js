@@ -113,6 +113,40 @@ test('maps a cookie-expiry error to the contract shape', async () => {
   expect(r).toEqual({ ok: false, error: 'LINE_OAM_COOKIE_INVALID' });
 });
 
+test('tags USER/GROUP and fetches members for group contacts', async () => {
+  let membersFetchedFor = null;
+  mock.module('../src/oam-api.js', () => ({
+    resolveOamBotId: async () => 'Ubot',
+    fetchContactsPage: async () => ({
+      list: [
+        { contactId: 'a', chatExists: true, profile: { name: 'A', iconHash: 'ha' } },
+        { contactId: 'g1', chatExists: true, profile: { name: 'Group 1', iconHash: 'hg', groupId: 'G1', count: 2 } },
+      ],
+      next: null,
+    }),
+    downloadChatCsv: async (_b, chatId) => `csv-${chatId}`,
+    fetchChatMembers: async (_b, chatId) => {
+      membersFetchedFor = chatId;
+      return [
+        { userId: 'U1', name: 'Mew', iconHash: 'h1' },
+        { userId: 'U2', name: 'Tukta', iconHash: 'h2' },
+      ];
+    },
+  }));
+  const { scrapeOam } = await import('../src/scrape.js');
+  const r = await scrapeOam({ basicId: '@x' });
+  expect(r.ok).toBe(true);
+  const [user, group] = r.contacts;
+  expect(user.type).toBe('USER');
+  expect(user.members).toBeUndefined();
+  expect(group.type).toBe('GROUP');
+  expect(group.members).toEqual([
+    { userId: 'U1', name: 'Mew', iconHash: 'h1' },
+    { userId: 'U2', name: 'Tukta', iconHash: 'h2' },
+  ]);
+  expect(membersFetchedFor).toBe('g1');
+});
+
 test('reuses the cached contacts page across batch calls (one fetch per page)', async () => {
   let pageFetches = 0;
   mock.module('../src/oam-api.js', () => ({

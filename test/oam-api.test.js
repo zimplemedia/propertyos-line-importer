@@ -44,3 +44,20 @@ test('fetch sends credentials:include and no Cookie header', async () => {
   expect(opts.credentials).toBe('include');
   expect(opts.headers.Cookie).toBeUndefined();
 });
+
+test('fetchChatMembers pages next to exhaustion and normalizes', async () => {
+  const pages = {
+    '': { list: [{ userId: 'U1', name: 'Mew', iconHash: 'h1' }], next: 'c2' },
+    c2: { list: [{ userId: 'U2', name: 'Tukta', iconHash: 'h2' }] },
+  };
+  globalThis.fetch = async (url) => {
+    const next = new URL('https://chat.line.biz' + url.replace('https://chat.line.biz', '')).searchParams.get('next') || '';
+    return new Response(JSON.stringify(pages[next]), { status: 200 });
+  };
+  const { fetchChatMembers } = await import('../src/oam-api.js');
+  const members = await fetchChatMembers('B1', 'C7f664');
+  expect(members).toEqual([
+    { userId: 'U1', name: 'Mew', iconHash: 'h1' },
+    { userId: 'U2', name: 'Tukta', iconHash: 'h2' },
+  ]);
+});
