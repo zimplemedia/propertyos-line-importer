@@ -78,7 +78,12 @@ export async function fetchChatMembers(botId, chatId) {
     all.push(...(data.list || []));
     next = data.next || null;
   } while (next);
-  return all.map((m) => ({ userId: m.userId, name: m.name || '', iconHash: m.iconHash || null }));
+  return all.map((m) => ({
+    userId: m.userId,
+    name: m.name || '',
+    nickname: m.nickname || null, // the OA's own label — the CSV export attributes messages by it
+    iconHash: m.iconHash || null,
+  }));
 }
 
 export async function downloadChatCsv(botId, chatId, { timezoneOffset = -420 } = {}) {

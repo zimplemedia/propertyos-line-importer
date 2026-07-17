@@ -77,6 +77,9 @@ export async function scrapeOam({ basicId, cursor, maxContacts = 100, maxBytes =
         const entry = {
           chatId: c.contactId,
           name: c.profile?.name || '',
+          // The OA's own label for this contact (distinct from the real display name above). Drives
+          // the CS-visible name + group sender attribution, since the CSV export labels senders by it.
+          nickname: c.profile?.nickname || null,
           iconHash: c.profile?.iconHash || null,
           csv: csvs[j],
           type: isGroup(c) ? 'GROUP' : 'USER',
