@@ -137,7 +137,7 @@ test('tags USER/GROUP and fetches members for group contacts', async () => {
   const r = await scrapeOam({ basicId: '@x' });
   expect(r.ok).toBe(true);
   const [user, group] = r.contacts;
-  expect(user.type).toBe('USER');
+  expect(user.type).toBe('DIRECT');
   expect(user.members).toBeUndefined();
   expect(group.type).toBe('GROUP');
   expect(group.members).toEqual([

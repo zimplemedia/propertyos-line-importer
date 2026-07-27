@@ -82,7 +82,9 @@ export async function scrapeOam({ basicId, cursor, maxContacts = 100, maxBytes =
           nickname: c.profile?.nickname || null,
           iconHash: c.profile?.iconHash || null,
           csv: csvs[j],
-          type: isGroup(c) ? 'GROUP' : 'USER',
+          // CONVERSATION_TYPE, not the old CONTACT_TYPE vocabulary: a 1:1 chat is a DIRECT thread.
+          // A person is a Contact; a room is a Conversation.
+          type: isGroup(c) ? 'GROUP' : 'DIRECT',
           metadata: oamChatState(c),
         };
         if (isGroup(c)) {
