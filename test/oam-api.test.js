@@ -1,8 +1,15 @@
-import { test, expect } from 'bun:test';
+import { afterEach, test, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 
 const fixture = (name) =>
   JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8'));
+const realFetch = globalThis.fetch;
+const realRandom = Math.random;
+
+afterEach(() => {
+  globalThis.fetch = realFetch;
+  Math.random = realRandom;
+});
 
 test('sanitized tag fixture pins the observed bare-array envelope', () => {
   const tags = fixture('tags.json');
@@ -61,6 +68,73 @@ test('fetchChatNotes must reject a truncated note envelope until pagination is e
   await expect(fetchChatNotes('B1', 'U-OAM-DIRECT')).rejects.toThrow(
     'LINE_OAM_NOTES_INCOMPLETE'
   );
+});
+
+test('fetchTags accepts only the bare array and normalizes allowlisted fields', async () => {
+  const { fetchTags } = await import('../src/oam-api.js');
+  const tags = fixture('tags.json');
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify(tags.map((tag) => ({ ...tag, secret: 'drop-me' }))), {
+      status: 200,
+    });
+
+  expect(await fetchTags('B1')).toEqual(tags);
+
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ list: tags }), { status: 200 });
+  await expect(fetchTags('B1')).rejects.toThrow('LINE_OAM_TAGS_INVALID');
+
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify([{ ...tags[0], tagId: '' }]), { status: 200 });
+  await expect(fetchTags('B1')).rejects.toThrow('LINE_OAM_TAGS_INVALID');
+});
+
+test('fetchChatNotes normalizes only the five observed note fields', async () => {
+  const { fetchChatNotes } = await import('../src/oam-api.js');
+  const notes = fixture('notes-page.json');
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        ...notes,
+        list: notes.list.map((note) => ({ ...note, secret: 'drop-me' })),
+      }),
+      { status: 200 }
+    );
+
+  expect(await fetchChatNotes('B1', 'U-OAM-DIRECT')).toEqual(notes.list);
+});
+
+test('new OAM endpoints retry 429 and map cookie expiry without exposing a Cookie header', async () => {
+  const { fetchChatNotes, fetchTags } = await import('../src/oam-api.js');
+  const tags = fixture('tags.json');
+  const notes = fixture('notes-page.json');
+  const calls = [];
+  Math.random = () => 0;
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url: String(url), options });
+    if (calls.length === 1) {
+      return new Response('', { status: 429, headers: { 'retry-after': '0.001' } });
+    }
+    return new Response(JSON.stringify(tags), { status: 200 });
+  };
+
+  expect(await fetchTags('B1')).toEqual(tags);
+  expect(calls).toHaveLength(2);
+  for (const { options } of calls) {
+    expect(options.credentials).toBe('include');
+    expect(options.headers.Cookie).toBeUndefined();
+  }
+
+  globalThis.fetch = async () => new Response('', { status: 401 });
+  await expect(fetchTags('B1')).rejects.toThrow('LINE_OAM_COOKIE_INVALID');
+  globalThis.fetch = async () => new Response('', { status: 403 });
+  await expect(fetchChatNotes('B1', 'U1')).rejects.toThrow(
+    'LINE_OAM_COOKIE_INVALID'
+  );
+
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify(notes), { status: 200 });
+  expect(await fetchChatNotes('B1', 'U1')).toEqual(notes.list);
 });
 
 test('validateOamSession is true on 200, false on 401', async () => {

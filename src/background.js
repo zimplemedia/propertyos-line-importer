@@ -3,16 +3,27 @@ import { scrapeOam } from './scrape.js';
 
 const VERSION = chrome.runtime.getManifest().version;
 
-async function handle(message) {
+export async function handle(message) {
   switch (message?.action) {
     case 'ping':
-      return { ok: true, version: VERSION };
+      return {
+        ok: true,
+        version: VERSION,
+        protocolVersion: 2,
+        capabilities: {
+          cursorV2: true,
+          fullSnapshot: true,
+          notes: true,
+          tags: true,
+          roomsSkipped: true,
+        },
+      };
     case 'checkSession':
       return { ok: true, loggedIn: await validateOamSession() };
     case 'scrapeOam':
       return await scrapeOam(message);
     default:
-      return { ok: false, error: 'LINE_API_ERROR', details: 'unknown action' };
+      return { ok: false, error: 'LINE_API_ERROR' };
   }
 }
 
@@ -21,6 +32,6 @@ async function handle(message) {
 chrome.runtime.onMessageExternal.addListener((message, _sender, sendResponse) => {
   handle(message)
     .then(sendResponse)
-    .catch((e) => sendResponse({ ok: false, error: 'LINE_API_ERROR', details: String(e?.message || e) }));
+    .catch(() => sendResponse({ ok: false, error: 'LINE_API_ERROR' }));
   return true;
 });
