@@ -1,0 +1,79 @@
+{
+  "list": [
+    {
+      "contactId": "U-OAM-DIRECT",
+      "chatExists": true,
+      "chatAvailable": true,
+      "done": false,
+      "followedUp": true,
+      "spam": false,
+      "useManualChat": false,
+      "lastTalkedAt": 1781947777445,
+      "tagIds": ["tag-apartment"],
+      "autoTagIds": ["auto-do-not-upload"],
+      "profile": {
+        "userId": "U-OAM-DIRECT",
+        "name": "Direct Person",
+        "nickname": "Direct nickname",
+        "iconHash": "icon-direct"
+      }
+    },
+    {
+      "contactId": "C-OAM-GROUP",
+      "chatExists": true,
+      "chatAvailable": true,
+      "done": false,
+      "followedUp": false,
+      "spam": false,
+      "useManualChat": false,
+      "lastTalkedAt": 1781947778445,
+      "tagIds": ["tag-follow-up"],
+      "autoTagIds": [],
+      "profile": {
+        "groupId": "C-OAM-GROUP",
+        "name": "Group Chat",
+        "nickname": null,
+        "iconHash": "icon-group",
+        "count": 3
+      }
+    },
+    {
+      "contactId": "U-OAM-NO-CHAT",
+      "chatExists": false,
+      "chatAvailable": false,
+      "done": false,
+      "followedUp": false,
+      "spam": false,
+      "useManualChat": false,
+      "lastTalkedAt": null,
+      "tagIds": [],
+      "autoTagIds": ["auto-do-not-upload"],
+      "profile": {
+        "userId": "U-OAM-NO-CHAT",
+        "name": "No Chat Person",
+        "nickname": null,
+        "iconHash": null
+      }
+    },
+    {
+      "contactId": "R-OAM-ROOM",
+      "chatExists": true,
+      "chatAvailable": true,
+      "done": false,
+      "followedUp": false,
+      "spam": false,
+      "useManualChat": false,
+      "lastTalkedAt": 1781947779445,
+      "tagIds": [],
+      "autoTagIds": [],
+      "profile": {
+        "roomId": "R-OAM-ROOM",
+        "name": "Unsupported Room",
+        "nickname": null,
+        "iconHash": "icon-room",
+        "count": 2
+      }
+    }
+  ],
+  "next": "sanitized-next-token"
+}

@@ -1,4 +1,67 @@
 import { test, expect } from 'bun:test';
+import { readFileSync } from 'node:fs';
+
+const fixture = (name) =>
+  JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8'));
+
+test('sanitized tag fixture pins the observed bare-array envelope', () => {
+  const tags = fixture('tags.json');
+  expect(Array.isArray(tags)).toBe(true);
+  expect(tags.length).toBeGreaterThan(1);
+  expect(tags.list).toBeUndefined();
+  expect(tags).toEqual(
+    tags.map(({ tagId, name, count, createdAt, updatedAt }) => ({
+      tagId,
+      name,
+      count,
+      createdAt,
+      updatedAt,
+    }))
+  );
+});
+
+test('sanitized contacts fixture covers supported rows, no-chat, tags, and rooms', () => {
+  const page = fixture('contacts-page.json');
+  const direct = page.list.find((contact) => contact.contactId === 'U-OAM-DIRECT');
+  const group = page.list.find((contact) => contact.contactId === 'C-OAM-GROUP');
+  const noChat = page.list.find((contact) => contact.contactId === 'U-OAM-NO-CHAT');
+  const room = page.list.find((contact) => contact.contactId === 'R-OAM-ROOM');
+
+  expect(direct.profile.userId).toBe(direct.contactId);
+  expect(group.profile.groupId).toBe(group.contactId);
+  expect(noChat.chatExists).toBe(false);
+  expect(room.profile.roomId).toBe(room.contactId);
+  for (const contact of page.list) {
+    expect(Array.isArray(contact.tagIds)).toBe(true);
+    expect(Array.isArray(contact.autoTagIds)).toBe(true);
+  }
+});
+
+test('sanitized note fixtures pin empty and populated envelopes and five note fields', () => {
+  const empty = fixture('notes-empty-page.json');
+  const populated = fixture('notes-page.json');
+
+  expect(empty).toEqual({ list: [], total: 0 });
+  expect(populated.total).toBe(populated.list.length);
+  expect(Object.keys(populated.list[0]).sort()).toEqual(
+    ['noteId', 'body', 'userBizId', 'createdAt', 'updatedAt'].sort()
+  );
+});
+
+test('fetchChatNotes must reject a truncated note envelope until pagination is exhausted', async () => {
+  const { fetchChatNotes } = await import('../src/oam-api.js');
+  expect(typeof fetchChatNotes).toBe('function');
+
+  const populated = fixture('notes-page.json');
+  global.fetch = async () =>
+    new Response(JSON.stringify({ ...populated, total: populated.list.length + 1 }), {
+      status: 200,
+    });
+
+  await expect(fetchChatNotes('B1', 'U-OAM-DIRECT')).rejects.toThrow(
+    'LINE_OAM_NOTES_INCOMPLETE'
+  );
+});
 
 test('validateOamSession is true on 200, false on 401', async () => {
   const { validateOamSession } = await import('../src/oam-api.js');

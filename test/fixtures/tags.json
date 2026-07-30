@@ -1,0 +1,16 @@
+[
+  {
+    "tagId": "tag-apartment",
+    "name": "Apartment",
+    "count": 28,
+    "createdAt": 1686036211358,
+    "updatedAt": 1781947777445
+  },
+  {
+    "tagId": "tag-follow-up",
+    "name": "Follow up",
+    "count": 7,
+    "createdAt": 1686036212358,
+    "updatedAt": 1781947778445
+  }
+]

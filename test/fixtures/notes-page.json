@@ -1,0 +1,12 @@
+{
+  "list": [
+    {
+      "noteId": "note-1",
+      "body": "Sanitized note body",
+      "userBizId": "sanitized-admin-id",
+      "createdAt": 1686036211358,
+      "updatedAt": 1686036212358
+    }
+  ],
+  "total": 1
+}
