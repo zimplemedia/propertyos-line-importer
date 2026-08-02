@@ -1,15 +1,14 @@
-import { validateOamSession } from './oam-api.js';
-import { scrapeOam } from './scrape.js';
+import { validateOamSession } from "./oam-api.js";
+import { scrapeOam } from "./scrape.js";
 
 const VERSION = chrome.runtime.getManifest().version;
 
 export async function handle(message) {
   switch (message?.action) {
-    case 'ping':
+    case "ping":
       return {
         ok: true,
         version: VERSION,
-        protocolVersion: 2,
         capabilities: {
           cursorV2: true,
           fullSnapshot: true,
@@ -18,20 +17,22 @@ export async function handle(message) {
           roomsSkipped: true,
         },
       };
-    case 'checkSession':
+    case "checkSession":
       return { ok: true, loggedIn: await validateOamSession() };
-    case 'scrapeOam':
+    case "scrapeOam":
       return await scrapeOam(message);
     default:
-      return { ok: false, error: 'LINE_API_ERROR' };
+      return { ok: false, error: "LINE_API_ERROR" };
   }
 }
 
 // Only origins in manifest externally_connectable.matches can reach this. Return true to keep the
 // channel open for the async sendResponse.
-chrome.runtime.onMessageExternal.addListener((message, _sender, sendResponse) => {
-  handle(message)
-    .then(sendResponse)
-    .catch(() => sendResponse({ ok: false, error: 'LINE_API_ERROR' }));
-  return true;
-});
+chrome.runtime.onMessageExternal.addListener(
+  (message, _sender, sendResponse) => {
+    handle(message)
+      .then(sendResponse)
+      .catch(() => sendResponse({ ok: false, error: "LINE_API_ERROR" }));
+    return true;
+  },
+);
