@@ -9,6 +9,13 @@ import {
 
 export const CURSOR_VERSION = 2;
 export const MAX_CONTACTS = 25;
+// Contacts fetched at once. Each one costs 2-3 OAM requests (CSV, notes, and a group's roster pages),
+// and oam-api caps the real network concurrency, so this is a work-unit width, not a request budget.
+//
+// Measured against a real OA: a batch is ~50 requests and the round trip to chat.line.biz is ~330ms,
+// so the scrape is latency-bound, not throughput-bound. Widening this is the only lever that moves
+// it — request spacing was measured to have no effect at these values.
+export const CONTACT_CONCURRENCY = 12;
 export const MAX_PAYLOAD_BYTES = 1_500_000;
 export const MAX_SINGLE_HISTORY_BYTES = 1_250_000;
 
@@ -186,6 +193,51 @@ async function collectContact({
   };
 }
 
+/**
+ * Fetch the planned contacts with at most CONTACT_CONCURRENCY in flight, annotating each entry in
+ * place. Indices are handed out in page order, so whatever goes unfetched is always a suffix, which
+ * is what lets the caller fold deterministically. Once the completed contacts already exceed the
+ * batch budget no further work is started — the rest of the page belongs to the next batch anyway.
+ */
+async function collectPlanned({
+  planned,
+  botId,
+  singleHistoryMaxBytes,
+  byteLimit,
+}) {
+  let nextIndex = 0;
+  let fetchedBytes = 0;
+  let budgetSpent = false;
+
+  async function worker() {
+    for (;;) {
+      if (budgetSpent) return;
+      const index = nextIndex++;
+      if (index >= planned.length) return;
+      const entry = planned[index];
+      if (entry.type === "ROOM") continue;
+      try {
+        entry.contact = await collectContact({
+          botId,
+          rawContact: entry.rawContact,
+          type: entry.type,
+          singleHistoryMaxBytes,
+        });
+        entry.bytes = encodedBytes(entry.contact);
+        entry.fetched = true;
+        fetchedBytes += entry.bytes;
+        if (fetchedBytes > byteLimit) budgetSpent = true;
+      } catch (error) {
+        entry.error = error;
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(CONTACT_CONCURRENCY, planned.length) }, worker),
+  );
+}
+
 function cursorAfterPage({
   botId,
   currentPageToken,
@@ -220,10 +272,21 @@ function cursorAfterPage({
   };
 }
 
-function withExactPayloadBytes(result) {
+// JSON.stringify of an array is '[' + items.join(',') + ']', and a plain contact serializes the same
+// standalone as it does inside the array. So the exact payload size is derivable from each contact's
+// own byte count, measured once, instead of re-encoding the whole growing batch per candidate.
+const contactsArrayBytes = (byteList) =>
+  byteList.length === 0
+    ? 2
+    : 2 + byteList.reduce((total, bytes) => total + bytes, 0) + byteList.length - 1;
+
+function withExactPayloadBytes(result, contactByteList) {
+  const arrayBytes = contactsArrayBytes(contactByteList);
   let payloadBytes = 0;
   for (;;) {
-    const next = encodedBytes({ ...result, payloadBytes });
+    // Only the envelope is re-encoded; '"contacts":[]' contributes exactly the 2 bytes swapped out.
+    const next =
+      encodedBytes({ ...result, contacts: [], payloadBytes }) - 2 + arrayBytes;
     if (next === payloadBytes) return { ...result, payloadBytes };
     payloadBytes = next;
   }
@@ -327,9 +390,15 @@ export async function scrapeOam({
     const acknowledged = new Set(state.processedContactIds);
     const processedIds = [...state.processedContactIds];
     const contacts = [];
+    const contactByteList = [];
     let unsupportedRoomCount = 0;
 
-    const resultFor = (candidateContacts, candidateProcessedIds, roomCount) => {
+    const resultFor = (
+      candidateContacts,
+      candidateByteList,
+      candidateProcessedIds,
+      roomCount,
+    ) => {
       const position = cursorAfterPage({
         botId,
         currentPageToken: state.pageToken,
@@ -338,40 +407,62 @@ export async function scrapeOam({
         processedIds: candidateProcessedIds,
         sequence: state.sequence,
       });
-      return withExactPayloadBytes({
-        ok: true,
-        batchId,
-        cursorIn,
-        cursorOut: position.cursorOut,
-        done: position.done,
-        botId,
-        ...(tagCatalog ? { tagCatalog } : {}),
-        contacts: candidateContacts,
-        unsupportedRoomCount: roomCount,
-      });
+      return withExactPayloadBytes(
+        {
+          ok: true,
+          batchId,
+          cursorIn,
+          cursorOut: position.cursorOut,
+          done: position.done,
+          botId,
+          ...(tagCatalog ? { tagCatalog } : {}),
+          contacts: candidateContacts,
+          unsupportedRoomCount: roomCount,
+        },
+        candidateByteList,
+      );
     };
 
+    // Plan the page in display order first, without touching the network. Rooms cost nothing, so they
+    // are consumed exactly where the serial walk consumed them: greedily, until a contact the batch
+    // cannot take ends the walk.
+    const planned = [];
+    let plannedContacts = 0;
     for (const rawContact of page.list) {
       if (acknowledged.has(rawContact.contactId)) continue;
       const type = classifyContact(rawContact);
       if (type === "ROOM") {
-        acknowledged.add(rawContact.contactId);
-        processedIds.push(rawContact.contactId);
+        planned.push({ type, rawContact });
+        continue;
+      }
+      if (plannedContacts >= contactLimit) break;
+      planned.push({ type, rawContact });
+      plannedContacts += 1;
+    }
+
+    await collectPlanned({
+      planned,
+      botId,
+      singleHistoryMaxBytes: historyLimit,
+      byteLimit,
+    });
+
+    // Fold in page order. An entry past the cut is never consulted, so a contact this batch would not
+    // have reached can neither fail it nor be acknowledged — exactly as when each fetch was serial.
+    for (const entry of planned) {
+      if (entry.type === "ROOM") {
+        acknowledged.add(entry.rawContact.contactId);
+        processedIds.push(entry.rawContact.contactId);
         unsupportedRoomCount += 1;
         continue;
       }
-      if (contacts.length >= contactLimit) break;
+      if (entry.error) throw entry.error;
+      if (!entry.fetched) break;
 
-      const contact = await collectContact({
-        botId,
-        rawContact,
-        type,
-        singleHistoryMaxBytes: historyLimit,
-      });
-      const candidateProcessedIds = [...processedIds, rawContact.contactId];
       const candidate = resultFor(
-        [...contacts, contact],
-        candidateProcessedIds,
+        [...contacts, entry.contact],
+        [...contactByteList, entry.bytes],
+        [...processedIds, entry.rawContact.contactId],
         unsupportedRoomCount,
       );
       if (candidate.payloadBytes > byteLimit) {
@@ -379,12 +470,18 @@ export async function scrapeOam({
           throw new Error("LINE_OAM_PAYLOAD_TOO_LARGE");
         break;
       }
-      contacts.push(contact);
-      acknowledged.add(rawContact.contactId);
-      processedIds.push(rawContact.contactId);
+      contacts.push(entry.contact);
+      contactByteList.push(entry.bytes);
+      acknowledged.add(entry.rawContact.contactId);
+      processedIds.push(entry.rawContact.contactId);
     }
 
-    const result = resultFor(contacts, processedIds, unsupportedRoomCount);
+    const result = resultFor(
+      contacts,
+      contactByteList,
+      processedIds,
+      unsupportedRoomCount,
+    );
     if (result.payloadBytes > byteLimit) {
       throw new Error("LINE_OAM_PAYLOAD_TOO_LARGE");
     }

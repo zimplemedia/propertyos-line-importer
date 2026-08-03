@@ -8,6 +8,45 @@ const HEADERS = {
 const RETRYABLE = new Set([429, 500, 502, 503, 504]);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Every request to chat.line.biz passes through here, so raising the scraper's contact concurrency
+// widens the work queue without widening the load OAM actually sees.
+//
+// MAX_IN_FLIGHT is the real protection. The spacing is only a burst damper for the moment many slots
+// free at once — deliberately small, because it applies to EVERY request: one batch is ~51 of them,
+// so each 10ms of spacing adds ~0.5s to that batch and the run is ~900 batches long.
+const MAX_IN_FLIGHT = 12;
+const MIN_REQUEST_SPACING_MS = 10;
+let inFlight = 0;
+let nextSlotAt = 0;
+const waiting = [];
+
+async function acquireRequestSlot() {
+  if (inFlight >= MAX_IN_FLIGHT) {
+    await new Promise((resolve) => waiting.push(resolve));
+  }
+  inFlight++;
+  // A monotonically advancing schedule, not a shared "last start" timestamp: concurrent acquirers
+  // each claim their own slot instead of all reading the same value and waking together.
+  const now = Date.now();
+  const startAt = Math.max(now, nextSlotAt);
+  nextSlotAt = startAt + MIN_REQUEST_SPACING_MS;
+  if (startAt > now) await sleep(startAt - now);
+}
+
+function releaseRequestSlot() {
+  inFlight--;
+  waiting.shift()?.();
+}
+
+async function limitedFetch(url, options) {
+  await acquireRequestSlot();
+  try {
+    return await fetch(url, options);
+  } finally {
+    releaseRequestSlot();
+  }
+}
+
 async function oamFetch(
   path,
   { accept } = {},
@@ -17,7 +56,10 @@ async function oamFetch(
   for (let attempt = 0; ; attempt++) {
     let res;
     try {
-      res = await fetch(BASE + path, { credentials: "include", headers });
+      res = await limitedFetch(BASE + path, {
+        credentials: "include",
+        headers,
+      });
     } catch (e) {
       // A REJECTED fetch is a transient network drop (net::ERR_NETWORK_CHANGED on a WiFi/VPN switch,
       // a brief offline blip) — not an HTTP status, so it never reaches the RETRYABLE check below.

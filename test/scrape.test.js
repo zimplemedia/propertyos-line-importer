@@ -355,6 +355,113 @@ test("retrying the same cursor produces the same deterministic receipt contract"
   expect(first.contacts).toEqual(retry.contacts);
 });
 
+test("contacts on a page are fetched concurrently, not one round trip at a time", async () => {
+  let inFlight = 0;
+  let peakInFlight = 0;
+  mockApi({
+    pages: {
+      __first__: {
+        list: Array.from({ length: 12 }, (_, i) => direct(`U${i}`)),
+        next: null,
+      },
+    },
+    csv: async (_botId, chatId) => {
+      inFlight += 1;
+      peakInFlight = Math.max(peakInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight -= 1;
+      return `csv-${chatId}`;
+    },
+  });
+  const { scrapeOam, CONTACT_CONCURRENCY } = await import("../src/scrape.js");
+
+  const result = await scrapeOam({ basicId: "@x" });
+
+  expect(result.contacts).toHaveLength(12);
+  expect(peakInFlight).toBeGreaterThan(1);
+  expect(peakInFlight).toBeLessThanOrEqual(CONTACT_CONCURRENCY);
+});
+
+test("out-of-order completion still yields page order and a prefix cursor", async () => {
+  const finished = [];
+  mockApi({
+    pages: {
+      __first__: {
+        list: [direct("U1"), direct("U2"), direct("U3"), direct("U4")],
+        next: null,
+      },
+    },
+    // Later contacts settle first; a fold that trusted completion order would reverse the batch.
+    csv: async (_botId, chatId) => {
+      const rank = Number(chatId.slice(1));
+      await new Promise((resolve) => setTimeout(resolve, (5 - rank) * 10));
+      finished.push(chatId);
+      return `csv-${chatId}`;
+    },
+  });
+  const { scrapeOam } = await import("../src/scrape.js");
+
+  const result = await scrapeOam({ basicId: "@x" });
+
+  expect(finished[0]).toBe("U4");
+  expect(result.contacts.map((contact) => contact.chatId)).toEqual([
+    "U1",
+    "U2",
+    "U3",
+    "U4",
+  ]);
+  expect(result.done).toBe(true);
+});
+
+test("the contact cap still bounds how much of the page is fetched at all", async () => {
+  const fetched = [];
+  mockApi({
+    pages: {
+      __first__: {
+        list: Array.from({ length: 10 }, (_, i) => direct(`U${i}`)),
+        next: "page-2",
+      },
+    },
+    csv: async (_botId, chatId) => {
+      fetched.push(chatId);
+      return `csv-${chatId}`;
+    },
+  });
+  const { scrapeOam } = await import("../src/scrape.js");
+
+  const result = await scrapeOam({ basicId: "@x", maxContacts: 3 });
+
+  expect(result.contacts).toHaveLength(3);
+  expect(fetched.sort()).toEqual(["U0", "U1", "U2"]);
+  expect(decodeCursor(result.cursorOut).processedContactIds).toEqual([
+    "U0",
+    "U1",
+    "U2",
+  ]);
+});
+
+test("a batch of many contacts reports its own exact encoded size", async () => {
+  mockApi({
+    pages: {
+      __first__: {
+        list: Array.from({ length: 8 }, (_, i) =>
+          direct(`U${i}`, { tagIds: ["tag-1"] }),
+        ),
+        next: null,
+      },
+    },
+    csv: async (_botId, chatId) => `${chatId}-${"แ".repeat(40)}`,
+  });
+  const { scrapeOam } = await import("../src/scrape.js");
+
+  const result = await scrapeOam({ basicId: "@x", includeTagCatalog: true });
+
+  expect(result.contacts).toHaveLength(8);
+  expect(new TextEncoder().encode(JSON.stringify(result)).byteLength).toBe(
+    result.payloadBytes,
+  );
+});
+
 test("invalid cursor is distinct from session and network errors", async () => {
   mockApi({
     pages: { __first__: { list: [], next: null } },
