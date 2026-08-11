@@ -9,13 +9,6 @@ export async function handle(message) {
       return {
         ok: true,
         version: VERSION,
-        capabilities: {
-          cursorV2: true,
-          fullSnapshot: true,
-          notes: true,
-          tags: true,
-          roomsSkipped: true,
-        },
       };
     case "checkSession":
       return { ok: true, loggedIn: await validateOamSession() };

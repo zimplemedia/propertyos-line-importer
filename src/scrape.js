@@ -7,22 +7,7 @@ import {
   resolveOamBotId,
 } from "./oam-api.js";
 
-export const CURSOR_VERSION = 2;
-export const MAX_CONTACTS = 25;
-// Contacts fetched at once. Each one costs 2-3 OAM requests (CSV, notes, and a group's roster pages),
-// and oam-api caps the real network concurrency, so this is a work-unit width, not a request budget.
-//
-// Measured against a real OA: a batch is ~50 requests and the round trip to chat.line.biz is ~330ms,
-// so the scrape is latency-bound, not throughput-bound. Widening this is the only lever that moves
-// it — request spacing was measured to have no effect at these values.
-export const CONTACT_CONCURRENCY = 12;
-export const MAX_PAYLOAD_BYTES = 1_500_000;
-export const MAX_SINGLE_HISTORY_BYTES = 1_250_000;
-
 const encoder = new TextEncoder();
-const encodedBytes = (value) =>
-  encoder.encode(JSON.stringify(value)).byteLength;
-const stringBytes = (value) => encoder.encode(value).byteLength;
 const nonEmptyString = (value) => typeof value === "string" && value.length > 0;
 const finiteNumberOrNull = (value) =>
   value === null || (typeof value === "number" && Number.isFinite(value));
@@ -36,8 +21,7 @@ function decodeCursor(cursor) {
       !value ||
       typeof value !== "object" ||
       Object.keys(value).sort().join(",") !==
-        "botId,pageToken,processedContactIds,sequence,v" ||
-      value.v !== CURSOR_VERSION ||
+        "botId,pageToken,processedContactIds,sequence" ||
       !nonEmptyString(value.botId) ||
       !(value.pageToken === null || nonEmptyString(value.pageToken)) ||
       !Array.isArray(value.processedContactIds) ||
@@ -57,7 +41,7 @@ function decodeCursor(cursor) {
 }
 
 async function batchIdFor(cursorIn, sequence) {
-  const material = `${CURSOR_VERSION}\n${sequence}\n${cursorIn ?? "<FIRST_BATCH>"}`;
+  const material = `${sequence}\n${cursorIn ?? "<FIRST_BATCH>"}`;
   const digest = await crypto.subtle.digest(
     "SHA-256",
     encoder.encode(material),
@@ -65,7 +49,7 @@ async function batchIdFor(cursorIn, sequence) {
   const hex = [...new Uint8Array(digest)]
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
-  return `oam-v${CURSOR_VERSION}-${sequence}-${hex.slice(0, 32)}`;
+  return `oam-${sequence}-${hex.slice(0, 32)}`;
 }
 
 function oamState(contact) {
@@ -150,12 +134,7 @@ function normalizeMembers(members) {
   });
 }
 
-async function collectContact({
-  botId,
-  rawContact,
-  type,
-  singleHistoryMaxBytes,
-}) {
+async function collectContact({ botId, rawContact, type, signal }) {
   const contact = normalizeContact(rawContact, type);
   if (!contact.chatExists) {
     return {
@@ -169,16 +148,13 @@ async function collectContact({
   }
 
   const [csv, notes, members] = await Promise.all([
-    downloadChatCsv(botId, contact.chatId),
-    fetchChatNotes(botId, contact.chatId),
+    downloadChatCsv(botId, contact.chatId, { signal }),
+    fetchChatNotes(botId, contact.chatId, { signal }),
     type === "GROUP"
-      ? fetchChatMembers(botId, contact.chatId)
+      ? fetchChatMembers(botId, contact.chatId, { signal })
       : Promise.resolve(null),
   ]);
   if (typeof csv !== "string") throw new Error("LINE_OAM_HISTORY_INVALID");
-  if (stringBytes(csv) > singleHistoryMaxBytes) {
-    throw new Error("LINE_OAM_HISTORY_TOO_LARGE");
-  }
   if (!Array.isArray(notes)) throw new Error("LINE_OAM_NOTES_INVALID");
 
   return {
@@ -194,48 +170,38 @@ async function collectContact({
 }
 
 /**
- * Fetch the planned contacts with at most CONTACT_CONCURRENCY in flight, annotating each entry in
- * place. Indices are handed out in page order, so whatever goes unfetched is always a suffix, which
- * is what lets the caller fold deterministically. Once the completed contacts already exceed the
- * batch budget no further work is started — the rest of the page belongs to the next batch anyway.
+ * Fetch the one bounded LINE source page, annotating entries in place. Every private request still
+ * passes through oam-api's authoritative network limiter; the final fold preserves source order
+ * regardless of which download finishes first.
  */
-async function collectPlanned({
-  planned,
-  botId,
-  singleHistoryMaxBytes,
-  byteLimit,
-}) {
-  let nextIndex = 0;
-  let fetchedBytes = 0;
-  let budgetSpent = false;
+async function collectPlanned({ planned, botId }) {
+  let firstError = null;
+  const controller = new AbortController();
 
-  async function worker() {
-    for (;;) {
-      if (budgetSpent) return;
-      const index = nextIndex++;
-      if (index >= planned.length) return;
-      const entry = planned[index];
-      if (entry.type === "ROOM") continue;
+  await Promise.all(
+    planned.map(async (entry) => {
+      if (entry.type === "ROOM") return;
       try {
         entry.contact = await collectContact({
           botId,
           rawContact: entry.rawContact,
           type: entry.type,
-          singleHistoryMaxBytes,
+          signal: controller.signal,
         });
-        entry.bytes = encodedBytes(entry.contact);
         entry.fetched = true;
-        fetchedBytes += entry.bytes;
-        if (fetchedBytes > byteLimit) budgetSpent = true;
       } catch (error) {
         entry.error = error;
+        if (!firstError) {
+          firstError = error;
+          // Stop queued requests and abort unavoidable sibling downloads once one contact has spent
+          // its final attempt. The server has not acknowledged this batch, so partial results are not
+          // useful and Resume can safely recollect it from the last confirmed cursor.
+          controller.abort(error);
+        }
       }
-    }
-  }
-
-  await Promise.all(
-    Array.from({ length: Math.min(CONTACT_CONCURRENCY, planned.length) }, worker),
+    }),
   );
+  if (firstError) throw firstError;
 }
 
 function cursorAfterPage({
@@ -251,7 +217,6 @@ function cursorAfterPage({
     if (!nextPageToken) return { cursorOut: null, done: true };
     return {
       cursorOut: encodeCursor({
-        v: CURSOR_VERSION,
         botId,
         pageToken: nextPageToken,
         processedContactIds: [],
@@ -262,7 +227,6 @@ function cursorAfterPage({
   }
   return {
     cursorOut: encodeCursor({
-      v: CURSOR_VERSION,
       botId,
       pageToken: currentPageToken,
       processedContactIds: processedIds,
@@ -270,26 +234,6 @@ function cursorAfterPage({
     }),
     done: false,
   };
-}
-
-// JSON.stringify of an array is '[' + items.join(',') + ']', and a plain contact serializes the same
-// standalone as it does inside the array. So the exact payload size is derivable from each contact's
-// own byte count, measured once, instead of re-encoding the whole growing batch per candidate.
-const contactsArrayBytes = (byteList) =>
-  byteList.length === 0
-    ? 2
-    : 2 + byteList.reduce((total, bytes) => total + bytes, 0) + byteList.length - 1;
-
-function withExactPayloadBytes(result, contactByteList) {
-  const arrayBytes = contactsArrayBytes(contactByteList);
-  let payloadBytes = 0;
-  for (;;) {
-    // Only the envelope is re-encoded; '"contacts":[]' contributes exactly the 2 bytes swapped out.
-    const next =
-      encodedBytes({ ...result, contacts: [], payloadBytes }) - 2 + arrayBytes;
-    if (next === payloadBytes) return { ...result, payloadBytes };
-    payloadBytes = next;
-  }
 }
 
 function safeError(error) {
@@ -302,11 +246,10 @@ function safeError(error) {
     "LINE_OAM_COOKIE_INVALID",
     "LINE_OAM_CURSOR_INVALID",
     "LINE_OAM_HISTORY_INVALID",
-    "LINE_OAM_HISTORY_TOO_LARGE",
     "LINE_OAM_MEMBERS_INVALID",
     "LINE_OAM_NOTES_INCOMPLETE",
     "LINE_OAM_NOTES_INVALID",
-    "LINE_OAM_PAYLOAD_TOO_LARGE",
+    "LINE_OAM_RATE_LIMITED",
     "LINE_OAM_TAGS_INVALID",
   ]);
   const matched = [...allowlisted].find((candidate) =>
@@ -318,7 +261,7 @@ function safeError(error) {
 /**
  * Collect one server-acknowledgeable OAM batch.
  *
- * Cursor v2 records acknowledged IDs from the current DISPLAY_NAME-sorted page. Every resume
+ * The cursor records acknowledged IDs from the current LAST_TALKED_AT-ascending page. Every resume
  * refetches that page and filters those IDs, so MV3 eviction and page reorder cannot fall back to a
  * numeric offset. The browser cookie remains entirely inside fetch(credentials:'include').
  */
@@ -326,45 +269,18 @@ export async function scrapeOam({
   basicId,
   cursor = null,
   includeTagCatalog = false,
-  maxContacts = MAX_CONTACTS,
-  maxBytes = MAX_PAYLOAD_BYTES,
-  singleHistoryMaxBytes = MAX_SINGLE_HISTORY_BYTES,
 }) {
   try {
     const cursorIn = cursor ?? null;
     const state = cursorIn
       ? decodeCursor(cursorIn)
       : {
-          v: CURSOR_VERSION,
           botId: await resolveOamBotId(basicId),
           pageToken: null,
           processedContactIds: [],
           sequence: 0,
         };
     const botId = state.botId;
-    const contactLimit = Math.min(
-      MAX_CONTACTS,
-      Math.max(
-        1,
-        Number.isSafeInteger(maxContacts) ? maxContacts : MAX_CONTACTS,
-      ),
-    );
-    const byteLimit = Math.min(
-      MAX_PAYLOAD_BYTES,
-      Math.max(
-        1,
-        Number.isSafeInteger(maxBytes) ? maxBytes : MAX_PAYLOAD_BYTES,
-      ),
-    );
-    const historyLimit = Math.min(
-      MAX_SINGLE_HISTORY_BYTES,
-      Math.max(
-        1,
-        Number.isSafeInteger(singleHistoryMaxBytes)
-          ? singleHistoryMaxBytes
-          : MAX_SINGLE_HISTORY_BYTES,
-      ),
-    );
     const batchId = await batchIdFor(cursorIn, state.sequence);
     const tagCatalog = includeTagCatalog ? await fetchTags(botId) : undefined;
     const page = await fetchContactsPage(botId, state.pageToken);
@@ -390,15 +306,9 @@ export async function scrapeOam({
     const acknowledged = new Set(state.processedContactIds);
     const processedIds = [...state.processedContactIds];
     const contacts = [];
-    const contactByteList = [];
     let unsupportedRoomCount = 0;
 
-    const resultFor = (
-      candidateContacts,
-      candidateByteList,
-      candidateProcessedIds,
-      roomCount,
-    ) => {
+    const resultFor = (candidateContacts, candidateProcessedIds, roomCount) => {
       const position = cursorAfterPage({
         botId,
         currentPageToken: state.pageToken,
@@ -407,48 +317,32 @@ export async function scrapeOam({
         processedIds: candidateProcessedIds,
         sequence: state.sequence,
       });
-      return withExactPayloadBytes(
-        {
-          ok: true,
-          batchId,
-          cursorIn,
-          cursorOut: position.cursorOut,
-          done: position.done,
-          botId,
-          ...(tagCatalog ? { tagCatalog } : {}),
-          contacts: candidateContacts,
-          unsupportedRoomCount: roomCount,
-        },
-        candidateByteList,
-      );
+      return {
+        ok: true,
+        batchId,
+        cursorIn,
+        cursorOut: position.cursorOut,
+        done: position.done,
+        botId,
+        ...(tagCatalog ? { tagCatalog } : {}),
+        contacts: candidateContacts,
+        unsupportedRoomCount: roomCount,
+      };
     };
 
-    // Plan the page in display order first, without touching the network. Rooms cost nothing, so they
-    // are consumed exactly where the serial walk consumed them: greedily, until a contact the batch
-    // cannot take ends the walk.
+    // Plan the complete LINE source page in display order before starting per-contact work. The
+    // /contacts?limit=100 response is the batch boundary; HTTP concurrency is enforced separately.
     const planned = [];
-    let plannedContacts = 0;
     for (const rawContact of page.list) {
       if (acknowledged.has(rawContact.contactId)) continue;
       const type = classifyContact(rawContact);
-      if (type === "ROOM") {
-        planned.push({ type, rawContact });
-        continue;
-      }
-      if (plannedContacts >= contactLimit) break;
       planned.push({ type, rawContact });
-      plannedContacts += 1;
     }
 
-    await collectPlanned({
-      planned,
-      botId,
-      singleHistoryMaxBytes: historyLimit,
-      byteLimit,
-    });
+    await collectPlanned({ planned, botId });
 
-    // Fold in page order. An entry past the cut is never consulted, so a contact this batch would not
-    // have reached can neither fail it nor be acknowledged — exactly as when each fetch was serial.
+    // Fold results back in source order so the staged payload and acknowledged cursor are stable even
+    // though the per-contact requests completed concurrently.
     for (const entry of planned) {
       if (entry.type === "ROOM") {
         acknowledged.add(entry.rawContact.contactId);
@@ -459,33 +353,12 @@ export async function scrapeOam({
       if (entry.error) throw entry.error;
       if (!entry.fetched) break;
 
-      const candidate = resultFor(
-        [...contacts, entry.contact],
-        [...contactByteList, entry.bytes],
-        [...processedIds, entry.rawContact.contactId],
-        unsupportedRoomCount,
-      );
-      if (candidate.payloadBytes > byteLimit) {
-        if (contacts.length === 0)
-          throw new Error("LINE_OAM_PAYLOAD_TOO_LARGE");
-        break;
-      }
       contacts.push(entry.contact);
-      contactByteList.push(entry.bytes);
       acknowledged.add(entry.rawContact.contactId);
       processedIds.push(entry.rawContact.contactId);
     }
 
-    const result = resultFor(
-      contacts,
-      contactByteList,
-      processedIds,
-      unsupportedRoomCount,
-    );
-    if (result.payloadBytes > byteLimit) {
-      throw new Error("LINE_OAM_PAYLOAD_TOO_LARGE");
-    }
-    return result;
+    return resultFor(contacts, processedIds, unsupportedRoomCount);
   } catch (error) {
     return safeError(error);
   }

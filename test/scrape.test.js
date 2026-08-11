@@ -102,66 +102,35 @@ beforeEach(() => {
   mockApi({ pages: { __first__: { list: [], next: null } } });
 });
 
-test("worker-cache loss resumes cursor v2 by refetching and filtering acknowledged IDs", async () => {
+test("worker-cache loss resumes from the next server-owned LINE page cursor", async () => {
   let pageFetches = 0;
   mockApi({
-    getPage: () => {
+    getPage: (token) => {
       pageFetches += 1;
-      return {
-        list: [direct("U1"), direct("U2"), direct("U3")],
-        next: null,
-      };
+      return token === null
+        ? { list: [direct("U1"), direct("U2")], next: "page-2" }
+        : { list: [direct("U3")], next: null };
     },
   });
   const { scrapeOam } = await import("../src/scrape.js");
 
-  const first = await scrapeOam({ basicId: "@x", maxContacts: 2 });
+  const first = await scrapeOam({ basicId: "@x" });
   const state = decodeCursor(first.cursorOut);
   expect(state).toEqual({
-    v: 2,
     botId: "Ubot",
-    pageToken: null,
-    processedContactIds: ["U1", "U2"],
+    pageToken: "page-2",
+    processedContactIds: [],
     sequence: 1,
   });
 
   const second = await scrapeOam({
     basicId: "@x",
     cursor: first.cursorOut,
-    maxContacts: 2,
   });
   expect(second.contacts.map((contact) => contact.chatId)).toEqual(["U3"]);
   expect(second.done).toBe(true);
   expect(second.cursorOut).toBeNull();
   expect(pageFetches).toBe(2);
-});
-
-test("page reorder cannot repeat an acknowledged contact", async () => {
-  let pageFetches = 0;
-  mockApi({
-    getPage: () => {
-      pageFetches += 1;
-      return {
-        list:
-          pageFetches === 1
-            ? [direct("U1"), direct("U2"), direct("U3")]
-            : [direct("U3"), direct("U1"), direct("U2")],
-        next: null,
-      };
-    },
-  });
-  const { scrapeOam } = await import("../src/scrape.js");
-
-  const first = await scrapeOam({ basicId: "@x", maxContacts: 1 });
-  const second = await scrapeOam({
-    basicId: "@x",
-    cursor: first.cursorOut,
-    maxContacts: 1,
-  });
-
-  expect(first.contacts.map((contact) => contact.chatId)).toEqual(["U1"]);
-  expect(second.contacts.map((contact) => contact.chatId)).toEqual(["U3"]);
-  expect(second.contacts.map((contact) => contact.chatId)).not.toContain("U1");
 });
 
 test("an all-no-chat page returns every person without history, notes, or roster calls", async () => {
@@ -284,53 +253,19 @@ test("missing tagIds fails instead of becoming an authoritative empty snapshot",
   });
 });
 
-test("one oversized CSV fails explicitly and is never truncated", async () => {
-  const history = "แ".repeat(20);
+test("a CSV larger than the former per-history ceiling is forwarded whole", async () => {
+  const history = "x".repeat(1_300_000);
   mockApi({
     pages: { __first__: { list: [direct("U1")], next: null } },
     csv: async () => history,
   });
   const { scrapeOam } = await import("../src/scrape.js");
 
-  const result = await scrapeOam({
-    basicId: "@x",
-    singleHistoryMaxBytes: 30,
-  });
-  expect(result).toEqual({
-    ok: false,
-    error: "LINE_OAM_HISTORY_TOO_LARGE",
-  });
-  expect(history).toHaveLength(20);
-});
-
-test("actual UTF-8 payload bytes close the batch before maxBytes", async () => {
-  mockApi({
-    pages: {
-      __first__: {
-        list: [direct("U1"), direct("U2")],
-        next: null,
-      },
-    },
-    csv: async (_botId, chatId) => `${chatId}-${"แ".repeat(30)}`,
-    notes: async () => [],
-  });
-  const { scrapeOam } = await import("../src/scrape.js");
-
-  const oneContact = await scrapeOam({
-    basicId: "@x",
-    maxContacts: 1,
-    maxBytes: 50_000,
-  });
-  const bounded = await scrapeOam({
-    basicId: "@x",
-    maxBytes: oneContact.payloadBytes,
-  });
-
-  expect(bounded.contacts).toHaveLength(1);
-  expect(bounded.payloadBytes).toBeLessThanOrEqual(oneContact.payloadBytes);
-  expect(new TextEncoder().encode(JSON.stringify(bounded)).byteLength).toBe(
-    bounded.payloadBytes,
-  );
+  const result = await scrapeOam({ basicId: "@x" });
+  expect(result.ok).toBe(true);
+  expect(result.contacts).toHaveLength(1);
+  expect(result.contacts[0].csv).toBe(history);
+  expect(result).not.toHaveProperty("payloadBytes");
 });
 
 test("retrying the same cursor produces the same deterministic receipt contract", async () => {
@@ -344,24 +279,24 @@ test("retrying the same cursor produces the same deterministic receipt contract"
   });
   const { scrapeOam } = await import("../src/scrape.js");
 
-  const first = await scrapeOam({ basicId: "@x", maxContacts: 1 });
-  const retry = await scrapeOam({ basicId: "@x", maxContacts: 1 });
+  const first = await scrapeOam({ basicId: "@x" });
+  const retry = await scrapeOam({ basicId: "@x" });
 
   expect(first).not.toHaveProperty("protocolVersion");
-  expect(first.batchId).toMatch(/^oam-v2-0-[0-9a-f]{32}$/);
+  expect(first.batchId).toBe("oam-0-3e225b5ce81eac7115eb527eaf22b172");
   expect(first.batchId).toBe(retry.batchId);
   expect(first.cursorIn).toBeNull();
   expect(first.cursorOut).toBe(retry.cursorOut);
   expect(first.contacts).toEqual(retry.contacts);
 });
 
-test("contacts on a page are fetched concurrently, not one round trip at a time", async () => {
+test("the complete 100-contact source page schedules while HTTP concurrency is limited separately", async () => {
   let inFlight = 0;
   let peakInFlight = 0;
   mockApi({
     pages: {
       __first__: {
-        list: Array.from({ length: 12 }, (_, i) => direct(`U${i}`)),
+        list: Array.from({ length: 100 }, (_, i) => direct(`U${i}`)),
         next: null,
       },
     },
@@ -373,13 +308,44 @@ test("contacts on a page are fetched concurrently, not one round trip at a time"
       return `csv-${chatId}`;
     },
   });
-  const { scrapeOam, CONTACT_CONCURRENCY } = await import("../src/scrape.js");
+  const { scrapeOam } = await import("../src/scrape.js");
 
   const result = await scrapeOam({ basicId: "@x" });
 
-  expect(result.contacts).toHaveLength(12);
-  expect(peakInFlight).toBeGreaterThan(1);
-  expect(peakInFlight).toBeLessThanOrEqual(CONTACT_CONCURRENCY);
+  expect(result.contacts).toHaveLength(100);
+  // oam-api is mocked here, so this observes source-page scheduling rather than its independent
+  // 35-request network ceiling.
+  expect(peakInFlight).toBe(100);
+});
+
+test("an exhausted request aborts sibling work and preserves the rate-limit error", async () => {
+  let abortedSiblings = 0;
+  mockApi({
+    pages: {
+      __first__: {
+        list: Array.from({ length: 100 }, (_, i) => direct(`U${i}`)),
+        next: null,
+      },
+    },
+    csv: async (_botId, chatId, { signal }) => {
+      if (chatId === "U0") throw new Error("LINE_OAM_RATE_LIMITED");
+      return new Promise((_resolve, reject) => {
+        const onAbort = () => {
+          abortedSiblings += 1;
+          reject(signal.reason);
+        };
+        if (signal.aborted) onAbort();
+        else signal.addEventListener("abort", onAbort, { once: true });
+      });
+    },
+  });
+  const { scrapeOam } = await import("../src/scrape.js");
+
+  expect(await scrapeOam({ basicId: "@x" })).toEqual({
+    ok: false,
+    error: "LINE_OAM_RATE_LIMITED",
+  });
+  expect(abortedSiblings).toBeGreaterThan(0);
 });
 
 test("out-of-order completion still yields page order and a prefix cursor", async () => {
@@ -413,7 +379,7 @@ test("out-of-order completion still yields page order and a prefix cursor", asyn
   expect(result.done).toBe(true);
 });
 
-test("the contact cap still bounds how much of the page is fetched at all", async () => {
+test("the complete LINE source page is fetched before advancing to its next cursor", async () => {
   const fetched = [];
   mockApi({
     pages: {
@@ -429,18 +395,19 @@ test("the contact cap still bounds how much of the page is fetched at all", asyn
   });
   const { scrapeOam } = await import("../src/scrape.js");
 
-  const result = await scrapeOam({ basicId: "@x", maxContacts: 3 });
+  const result = await scrapeOam({ basicId: "@x" });
 
-  expect(result.contacts).toHaveLength(3);
-  expect(fetched.sort()).toEqual(["U0", "U1", "U2"]);
-  expect(decodeCursor(result.cursorOut).processedContactIds).toEqual([
-    "U0",
-    "U1",
-    "U2",
-  ]);
+  expect(result.contacts).toHaveLength(10);
+  expect(fetched.sort()).toEqual(
+    Array.from({ length: 10 }, (_, i) => `U${i}`).sort(),
+  );
+  expect(decodeCursor(result.cursorOut)).toMatchObject({
+    pageToken: "page-2",
+    processedContactIds: [],
+  });
 });
 
-test("a batch of many contacts reports its own exact encoded size", async () => {
+test("a batch of many contacts is forwarded without a PropertyOS byte ceiling", async () => {
   mockApi({
     pages: {
       __first__: {
@@ -457,9 +424,27 @@ test("a batch of many contacts reports its own exact encoded size", async () => 
   const result = await scrapeOam({ basicId: "@x", includeTagCatalog: true });
 
   expect(result.contacts).toHaveLength(8);
-  expect(new TextEncoder().encode(JSON.stringify(result)).byteLength).toBe(
-    result.payloadBytes,
-  );
+  expect(result).not.toHaveProperty("payloadBytes");
+});
+
+test("one full 100-contact LINE page is one PropertyOS batch", async () => {
+  mockApi({
+    pages: {
+      __first__: {
+        list: Array.from({ length: 100 }, (_, i) =>
+          direct(`U${i}`, { chatExists: false }),
+        ),
+        next: null,
+      },
+    },
+  });
+  const { scrapeOam } = await import("../src/scrape.js");
+
+  const result = await scrapeOam({ basicId: "@x" });
+
+  expect(result.contacts).toHaveLength(100);
+  expect(result.cursorOut).toBeNull();
+  expect(result.done).toBe(true);
 });
 
 test("invalid cursor is distinct from session and network errors", async () => {
@@ -468,15 +453,26 @@ test("invalid cursor is distinct from session and network errors", async () => {
   });
   const { scrapeOam } = await import("../src/scrape.js");
 
-  expect(await scrapeOam({ basicId: "@x", cursor: "not-a-v2-cursor" })).toEqual(
-    {
-      ok: false,
-      error: "LINE_OAM_CURSOR_INVALID",
-    },
+  expect(await scrapeOam({ basicId: "@x", cursor: "not-a-cursor" })).toEqual({
+    ok: false,
+    error: "LINE_OAM_CURSOR_INVALID",
+  });
+  const versionedCursor = btoa(
+    JSON.stringify({
+      v: 3,
+      botId: "Ubot",
+      pageToken: null,
+      processedContactIds: [],
+      sequence: 1,
+    }),
   );
+  expect(await scrapeOam({ basicId: "@x", cursor: versionedCursor })).toEqual({
+    ok: false,
+    error: "LINE_OAM_CURSOR_INVALID",
+  });
 });
 
-test("ping advertises required capabilities and versions stay locked at 0.4.0", async () => {
+test("ping reports the diagnostic extension version", async () => {
   const manifest = JSON.parse(
     readFileSync(new URL("../manifest.json", import.meta.url), "utf8"),
   );
@@ -496,17 +492,10 @@ test("ping advertises required capabilities and versions stay locked at 0.4.0", 
 
   expect(await handle({ action: "ping" })).toEqual({
     ok: true,
-    version: "0.4.0",
-    capabilities: {
-      cursorV2: true,
-      fullSnapshot: true,
-      notes: true,
-      tags: true,
-      roomsSkipped: true,
-    },
+    version: "0.4.11",
   });
-  expect(manifest.version).toBe("0.4.0");
-  expect(packageJson.version).toBe("0.4.0");
+  expect(manifest.version).toBe("0.4.11");
+  expect(packageJson.version).toBe("0.4.11");
   expect(manifest.key).toMatch(/^MIIB/);
   expect(listeners).toHaveLength(1);
 });
