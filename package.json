@@ -1,6 +1,6 @@
 {
   "name": "propertyos-line-importer",
-  "version": "0.4.11",
+  "version": "0.4.12",
   "private": false,
   "type": "module",
   "scripts": {
