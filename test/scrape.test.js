@@ -43,6 +43,7 @@ const room = (id) => ({
 let currentApi;
 
 mock.module("../src/oam-api.js", () => ({
+  beginCsvScrapeCycle: () => () => {},
   resolveOamBotId: (...args) => currentApi.resolveOamBotId(...args),
   fetchContactsPage: (...args) => currentApi.fetchContactsPage(...args),
   downloadChatCsv: (...args) => currentApi.downloadChatCsv(...args),
@@ -492,10 +493,10 @@ test("ping reports the diagnostic extension version", async () => {
 
   expect(await handle({ action: "ping" })).toEqual({
     ok: true,
-    version: "0.4.12",
+    version: "0.4.13",
   });
-  expect(manifest.version).toBe("0.4.12");
-  expect(packageJson.version).toBe("0.4.12");
+  expect(manifest.version).toBe("0.4.13");
+  expect(packageJson.version).toBe("0.4.13");
   expect(manifest.key).toMatch(/^MIIB/);
   expect(listeners).toHaveLength(1);
 });

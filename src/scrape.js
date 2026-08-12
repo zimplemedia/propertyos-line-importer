@@ -1,4 +1,5 @@
 import {
+  beginCsvScrapeCycle,
   downloadChatCsv,
   fetchChatMembers,
   fetchChatNotes,
@@ -270,6 +271,7 @@ export async function scrapeOam({
   cursor = null,
   includeTagCatalog = false,
 }) {
+  const endCsvScrapeCycle = beginCsvScrapeCycle();
   try {
     const cursorIn = cursor ?? null;
     const state = cursorIn
@@ -361,5 +363,7 @@ export async function scrapeOam({
     return resultFor(contacts, processedIds, unsupportedRoomCount);
   } catch (error) {
     return safeError(error);
+  } finally {
+    endCsvScrapeCycle();
   }
 }

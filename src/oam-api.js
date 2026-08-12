@@ -532,6 +532,7 @@ let csvGateStage = null; // "first" | "final" — meaningful only while csvGateO
 let csvGateDeadline = 0;
 let csvGateFailed = false;
 const csvGateWaiters = new Set();
+let activeCsvScrapeCycles = 0;
 
 // Testing-only seam: inject a fake clock/sleep and reset every module-level CSV state variable so
 // tests do not wait on the real 67ms/2s/60s production values or leak state between tests. Never
@@ -546,6 +547,7 @@ export function __resetCsvForTests({ now = Date.now, sleepFn = sleep } = {}) {
   csvGateDeadline = 0;
   csvGateFailed = false;
   csvGateWaiters.clear();
+  activeCsvScrapeCycles = 0;
 }
 
 function notifyCsvGateWaiters() {
@@ -587,7 +589,8 @@ async function acquireCsvSpacing(signal) {
     const wait = csvNextDispatchAt - csvClock.now();
     if (wait > 0) await csvClock.sleepFn(wait, signal);
     throwIfAborted(signal);
-    csvNextDispatchAt = Math.max(csvNextDispatchAt, csvClock.now()) + CSV_START_SPACING_MS;
+    csvNextDispatchAt =
+      Math.max(csvNextDispatchAt, csvClock.now()) + CSV_START_SPACING_MS;
   } finally {
     releaseChain();
   }
@@ -633,13 +636,15 @@ function handleCsvRateLimit(response, requestId) {
     csvGateOpen = false;
     csvGateOwner = requestId;
     csvGateStage = "first";
-    csvGateDeadline = csvClock.now() + csvRetryDelayMs(response, CSV_FIRST_429_RETRY_MS);
+    csvGateDeadline =
+      csvClock.now() + csvRetryDelayMs(response, CSV_FIRST_429_RETRY_MS);
     return;
   }
   if (csvGateOwner !== requestId) return;
   if (csvGateStage === "first") {
     csvGateStage = "final";
-    csvGateDeadline = csvClock.now() + csvRetryDelayMs(response, CSV_FINAL_429_RETRY_MS);
+    csvGateDeadline =
+      csvClock.now() + csvRetryDelayMs(response, CSV_FINAL_429_RETRY_MS);
     return;
   }
   csvGateFailed = true;
@@ -652,6 +657,25 @@ function openCsvGate() {
   csvGateStage = null;
   csvGateFailed = false;
   notifyCsvGateWaiters();
+}
+
+/**
+ * Mark one top-level scrape as the owner of the current CSV recovery cycle.
+ *
+ * A third 429 intentionally fails every CSV request belonging to that scrape. The failed gate must
+ * survive until all of those requests have unwound, otherwise an aborted sibling could wake and
+ * continue the old batch. A later explicit scrape (the frontend's Resume action) may start with a
+ * fresh gate, but only once no older top-level scrape remains active.
+ */
+export function beginCsvScrapeCycle() {
+  if (activeCsvScrapeCycles === 0 && csvGateFailed) openCsvGate();
+  activeCsvScrapeCycles += 1;
+  let ended = false;
+  return () => {
+    if (ended) return;
+    ended = true;
+    activeCsvScrapeCycles = Math.max(0, activeCsvScrapeCycles - 1);
+  };
 }
 
 // If the owner's request fails for a reason other than a 429 (network error, cookie expiry, abort)

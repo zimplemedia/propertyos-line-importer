@@ -438,7 +438,9 @@ test("global HTTP concurrency never exceeds the 35-request ceiling", async () =>
       });
     });
 
-  const calls = Array.from({ length: MAX_IN_FLIGHT + 15 }, () => fetchTags("B1"));
+  const calls = Array.from({ length: MAX_IN_FLIGHT + 15 }, () =>
+    fetchTags("B1"),
+  );
   await new Promise((resolve) => setTimeout(resolve, 10));
   expect(active).toBe(MAX_IN_FLIGHT);
   expect(peak).toBe(MAX_IN_FLIGHT);
@@ -477,7 +479,13 @@ function makeFakeClock() {
       if (t < target) t = target;
     });
   };
-  return { now, sleepFn, advance: (ms) => { t += ms; } };
+  return {
+    now,
+    sleepFn,
+    advance: (ms) => {
+      t += ms;
+    },
+  };
 }
 
 // --- CSV admission spacing --------------------------------------------------------------------
@@ -586,6 +594,42 @@ test("a third 429 throws LINE_OAM_RATE_LIMITED after exactly three total attempt
   expect(calls).toBe(3);
 });
 
+test("a later top-level scrape gets a fresh CSV gate after the previous scrape exhausts 429 recovery", async () => {
+  const { beginCsvScrapeCycle, downloadChatCsv, __resetCsvForTests } =
+    await import("../src/oam-api.js");
+  const { now, sleepFn } = makeFakeClock();
+  __resetCsvForTests({ now, sleepFn });
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls <= 3) return new Response("", { status: 429 });
+    return new Response("Sender type,resumed", { status: 200 });
+  };
+
+  const endFailedScrape = beginCsvScrapeCycle();
+  await expect(downloadChatCsv("B1", "failed-chat")).rejects.toThrow(
+    "LINE_OAM_RATE_LIMITED",
+  );
+
+  // A scrape that overlaps the failed owner still belongs to the same failed cycle. It must not
+  // reopen the gate or dispatch any additional request from the old browser collection.
+  const endOverlappingScrape = beginCsvScrapeCycle();
+  await expect(downloadChatCsv("B1", "old-sibling")).rejects.toThrow(
+    "LINE_OAM_RATE_LIMITED",
+  );
+  expect(calls).toBe(3);
+  endOverlappingScrape();
+  endFailedScrape();
+
+  // Once every old scrape has unwound, an explicit later Resume starts a fresh recovery cycle.
+  const endResumedScrape = beginCsvScrapeCycle();
+  await expect(downloadChatCsv("B1", "resumed-chat")).resolves.toContain(
+    "resumed",
+  );
+  endResumedScrape();
+  expect(calls).toBe(4);
+});
+
 test("a valid Retry-After overrides the applicable CSV fallback delay", async () => {
   const { downloadChatCsv, __resetCsvForTests } =
     await import("../src/oam-api.js");
@@ -608,8 +652,12 @@ test("a valid Retry-After overrides the applicable CSV fallback delay", async ()
 // --- Sibling coordination ------------------------------------------------------------------
 
 test("sibling 429s from the same burst do not extend the deadline or become additional probes, and resume at 67ms spacing after recovery", async () => {
-  const { downloadChatCsv, CSV_START_SPACING_MS, CSV_FIRST_429_RETRY_MS, __resetCsvForTests } =
-    await import("../src/oam-api.js");
+  const {
+    downloadChatCsv,
+    CSV_START_SPACING_MS,
+    CSV_FIRST_429_RETRY_MS,
+    __resetCsvForTests,
+  } = await import("../src/oam-api.js");
   const { now, sleepFn } = makeFakeClock();
   __resetCsvForTests({ now, sleepFn });
 
@@ -664,8 +712,12 @@ test("sibling 429s from the same burst do not extend the deadline or become addi
   // the fake clock. It resolves close to the owner's original 2s deadline instead.
   expect(now()).toBeLessThan(CSV_FIRST_429_RETRY_MS + 5_000);
 
-  const ownerDispatches = dispatched.filter((d) => d.label === "owner").map((d) => d.at);
-  const siblingDispatches = dispatched.filter((d) => d.label === "sibling").map((d) => d.at);
+  const ownerDispatches = dispatched
+    .filter((d) => d.label === "owner")
+    .map((d) => d.at);
+  const siblingDispatches = dispatched
+    .filter((d) => d.label === "sibling")
+    .map((d) => d.at);
   expect(ownerDispatches).toHaveLength(2); // initial failure + the one probe
   expect(siblingDispatches).toHaveLength(2); // initial failure + resumed attempt (never a probe)
   // The sibling's resumed attempt went back through the normal 67ms spacing queue rather than
@@ -701,9 +753,13 @@ test("notes, contacts, and members keep working while the CSV gate is closed", a
       // real-time waits below the way a fake-clock sleep otherwise would
     }
     if (path.includes("/notes"))
-      return new Response(JSON.stringify({ list: [], total: 0 }), { status: 200 });
+      return new Response(JSON.stringify({ list: [], total: 0 }), {
+        status: 200,
+      });
     if (path.includes("/contacts"))
-      return new Response(JSON.stringify({ list: [], next: null }), { status: 200 });
+      return new Response(JSON.stringify({ list: [], next: null }), {
+        status: 200,
+      });
     if (path.includes("/members"))
       return new Response(JSON.stringify({ list: [] }), { status: 200 });
     return new Response("{}", { status: 200 });
@@ -753,7 +809,12 @@ test("aborting the owner while it waits out its own probe delay reopens the gate
     return new Promise((resolve, reject) => {
       signal?.addEventListener(
         "abort",
-        () => reject(signal.reason instanceof Error ? signal.reason : new Error("aborted")),
+        () =>
+          reject(
+            signal.reason instanceof Error
+              ? signal.reason
+              : new Error("aborted"),
+          ),
         { once: true },
       );
     });
@@ -770,7 +831,8 @@ test("aborting the owner while it waits out its own probe delay reopens the gate
   // The gate must not be left stuck closed forever: a fresh call is free to become the new owner
   // immediately -- it may still owe the normal spacing gap against the aborted call's own real
   // dispatch, but it must never fall into ANOTHER gate-recovery wait, since nothing 429'd for it.
-  globalThis.fetch = async () => new Response("Sender type,ok", { status: 200 });
+  globalThis.fetch = async () =>
+    new Response("Sender type,ok", { status: 200 });
   const gateWaitsBefore = gateWaits;
   const result = await downloadChatCsv("B1", "c2");
   expect(result).toContain("Sender type");
@@ -805,7 +867,9 @@ test("aborting a parked (non-owner) sibling does not strand it or corrupt the ga
   while (ownerAttempt < 2) await new Promise((r) => setTimeout(r, 1));
 
   const controller = new AbortController();
-  const sibling = downloadChatCsv("B1", "sibling-chat", { signal: controller.signal });
+  const sibling = downloadChatCsv("B1", "sibling-chat", {
+    signal: controller.signal,
+  });
   await new Promise((r) => setTimeout(r, 1));
   expect(siblingAttempt).toBe(0); // parked at the gate, never dispatched a fetch of its own
 
