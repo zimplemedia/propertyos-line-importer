@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PropertyOS LINE Importer",
-  "version": "0.4.11",
+  "version": "0.4.13",
   "description": "Import your LINE Official Account chat history into PropertyOS.",
   "minimum_chrome_version": "102",
   "host_permissions": ["https://chat.line.biz/*"],
