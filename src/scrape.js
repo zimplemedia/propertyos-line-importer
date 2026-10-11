@@ -135,8 +135,26 @@ function normalizeMembers(members) {
   });
 }
 
-async function collectContact({ botId, rawContact, type, signal }) {
+async function collectContact({ botId, rawContact, type, light, signal }) {
   const contact = normalizeContact(rawContact, type);
+  // A light row (a chat outside a period Sync's window) carries the contact-list data and, for a
+  // group, its member list — no history and no notes, the two downloads the rate limit governs.
+  if (contact.chatExists && light) {
+    const members =
+      type === "GROUP"
+        ? await fetchChatMembers(botId, contact.chatId, { signal })
+        : null;
+    return {
+      ...contact,
+      csv: null,
+      historyComplete: false,
+      notes: [],
+      notesComplete: false,
+      ...(type === "GROUP"
+        ? { members: normalizeMembers(members), rosterComplete: true }
+        : {}),
+    };
+  }
   if (!contact.chatExists) {
     return {
       ...contact,
@@ -187,6 +205,7 @@ async function collectPlanned({ planned, botId }) {
           botId,
           rawContact: entry.rawContact,
           type: entry.type,
+          light: entry.outsidePeriod,
           signal: controller.signal,
         });
         entry.fetched = true;
@@ -270,9 +289,16 @@ export async function scrapeOam({
   basicId,
   cursor = null,
   includeTagCatalog = false,
+  since = null,
 }) {
   const endCsvScrapeCycle = beginCsvScrapeCycle();
   try {
+    if (!(
+      since === null ||
+      (typeof since === "number" && Number.isFinite(since))
+    )) {
+      throw new Error("LINE_API_ERROR");
+    }
     const cursorIn = cursor ?? null;
     const state = cursorIn
       ? decodeCursor(cursorIn)
@@ -338,7 +364,16 @@ export async function scrapeOam({
     for (const rawContact of page.list) {
       if (acknowledged.has(rawContact.contactId)) continue;
       const type = classifyContact(rawContact);
-      planned.push({ type, rawContact });
+      // A period Sync (since = epoch ms) sends a chat last active before the cutoff, or never active,
+      // as a light row.
+      const outsidePeriod =
+        since !== null &&
+        type !== "ROOM" &&
+        !(
+          typeof rawContact.lastTalkedAt === "number" &&
+          rawContact.lastTalkedAt >= since
+        );
+      planned.push({ type, rawContact, outsidePeriod });
     }
 
     await collectPlanned({ planned, botId });
