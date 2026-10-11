@@ -240,6 +240,133 @@ test("a mixed page fetches chat-only data, group roster, carries manual tags, an
   expect(JSON.stringify(result)).not.toContain("must-not-leak");
 });
 
+test("a period scrape sends old chats as light rows: profile, tags and group members, no history or notes", async () => {
+  const csvCalls = [];
+  const noteCalls = [];
+  const memberCalls = [];
+  const at = (contact, lastTalkedAt) => ({ ...contact, lastTalkedAt });
+  mockApi({
+    getPage: (token) =>
+      token === null
+        ? {
+            list: [
+              at({ ...direct("U-old"), followedUp: true }, 1000),
+              at(group("C-old"), 2999),
+              direct("U-no-chat", { chatExists: false }),
+            ],
+            next: "page-2",
+          }
+        : {
+            list: [
+              at(direct("U-edge"), 3000),
+              at(group("C-new"), 5000),
+              room("R-room"),
+            ],
+            next: null,
+          },
+    csv: (_botId, chatId) => {
+      csvCalls.push(chatId);
+      return `csv-${chatId}`;
+    },
+    notes: (_botId, chatId) => {
+      noteCalls.push(chatId);
+      return [];
+    },
+    members: async (_botId, chatId) => {
+      memberCalls.push(chatId);
+      return [
+        {
+          userId: `U-in-${chatId}`,
+          name: "Member",
+          nickname: null,
+          iconHash: null,
+        },
+      ];
+    },
+  });
+  const { scrapeOam } = await import("../src/scrape.js");
+
+  const first = await scrapeOam({ basicId: "@x", since: 3000 });
+  expect(first.contacts.map((contact) => contact.chatId)).toEqual([
+    "U-old",
+    "C-old",
+    "U-no-chat",
+  ]);
+  const [oldDirect, oldGroup, noChat] = first.contacts;
+  expect(oldDirect).toMatchObject({
+    chatExists: true,
+    csv: null,
+    historyComplete: false,
+    notes: [],
+    notesComplete: false,
+    oamState: { followedUp: true },
+  });
+  expect(oldGroup).toMatchObject({
+    chatExists: true,
+    csv: null,
+    historyComplete: false,
+    notesComplete: false,
+    members: [
+      {
+        externalId: "U-in-C-old",
+        name: "Member",
+        nickname: null,
+        iconHash: null,
+      },
+    ],
+    rosterComplete: true,
+  });
+  expect(noChat).toMatchObject({
+    chatExists: false,
+    csv: null,
+    historyComplete: false,
+  });
+  expect(first.done).toBe(false);
+  expect(decodeCursor(first.cursorOut).pageToken).toBe("page-2");
+
+  const second = await scrapeOam({
+    basicId: "@x",
+    cursor: first.cursorOut,
+    since: 3000,
+  });
+  expect(second.contacts.map((contact) => contact.chatId)).toEqual([
+    "U-edge",
+    "C-new",
+  ]);
+  expect(
+    second.contacts.every(
+      (contact) => contact.historyComplete && contact.notesComplete,
+    ),
+  ).toBe(true);
+  expect(second.unsupportedRoomCount).toBe(1);
+  expect(second.done).toBe(true);
+  expect(csvCalls.sort()).toEqual(["C-new", "U-edge"]);
+  expect(noteCalls.sort()).toEqual(["C-new", "U-edge"]);
+  expect(memberCalls.sort()).toEqual(["C-new", "C-old"]);
+});
+
+test("a full scrape (no since) is unchanged and a malformed since is refused", async () => {
+  mockApi({
+    pages: {
+      __first__: {
+        list: [{ ...direct("U-old"), lastTalkedAt: 1 }],
+        next: null,
+      },
+    },
+  });
+  const { scrapeOam } = await import("../src/scrape.js");
+
+  expect(
+    (await scrapeOam({ basicId: "@x" })).contacts.map(
+      (contact) => contact.chatId,
+    ),
+  ).toEqual(["U-old"]);
+  expect(await scrapeOam({ basicId: "@x", since: "3000" })).toEqual({
+    ok: false,
+    error: "LINE_API_ERROR",
+  });
+});
+
 test("missing tagIds fails instead of becoming an authoritative empty snapshot", async () => {
   const malformed = direct("U1");
   delete malformed.tagIds;
@@ -493,10 +620,10 @@ test("ping reports the diagnostic extension version", async () => {
 
   expect(await handle({ action: "ping" })).toEqual({
     ok: true,
-    version: "0.4.16",
+    version: "0.4.17",
   });
-  expect(manifest.version).toBe("0.4.16");
-  expect(packageJson.version).toBe("0.4.16");
+  expect(manifest.version).toBe("0.4.17");
+  expect(packageJson.version).toBe("0.4.17");
   expect(manifest.key).toMatch(/^MIIB/);
   expect(listeners).toHaveLength(1);
 });
