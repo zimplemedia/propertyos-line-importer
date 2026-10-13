@@ -2,7 +2,9 @@
 
 Imports your LINE Official Account chat history into PropertyOS. Your LINE session cookie never
 leaves your browser — the extension scrapes `chat.line.biz` locally and sends only the chat data
-to PropertyOS over your logged-in session.
+to PropertyOS over your logged-in session. Since 0.4.18 the final batch of a Sync also carries the
+OA Manager admin list (bizId and display name only), so PropertyOS can name the admin who wrote an
+imported note.
 
 ## Install (developer mode)
 
