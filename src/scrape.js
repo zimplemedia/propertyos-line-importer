@@ -4,6 +4,7 @@ import {
   fetchChatMembers,
   fetchChatNotes,
   fetchContactsPage,
+  fetchOwners,
   fetchTags,
   resolveOamBotId,
 } from "./oam-api.js";
@@ -336,7 +337,11 @@ export async function scrapeOam({
     const contacts = [];
     let unsupportedRoomCount = 0;
 
-    const resultFor = (candidateContacts, candidateProcessedIds, roomCount) => {
+    const resultFor = async (
+      candidateContacts,
+      candidateProcessedIds,
+      roomCount,
+    ) => {
       const position = cursorAfterPage({
         botId,
         currentPageToken: state.pageToken,
@@ -345,6 +350,20 @@ export async function scrapeOam({
         processedIds: candidateProcessedIds,
         sequence: state.sequence,
       });
+      // The admin list rides along with the final batch only — once per Sync. It is a nice-to-have
+      // (note authors fall back to the agency name server-side), so a failure must not fail a batch
+      // whose contacts are already scraped.
+      let owners;
+      if (position.done) {
+        try {
+          owners = await fetchOwners(botId);
+        } catch (error) {
+          console.warn(
+            "LINE OAM admin list unavailable, sending batch without owners",
+            error,
+          );
+        }
+      }
       return {
         ok: true,
         batchId,
@@ -353,6 +372,7 @@ export async function scrapeOam({
         done: position.done,
         botId,
         ...(tagCatalog ? { tagCatalog } : {}),
+        ...(owners ? { owners } : {}),
         contacts: candidateContacts,
         unsupportedRoomCount: roomCount,
       };

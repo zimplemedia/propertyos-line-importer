@@ -386,6 +386,34 @@ export async function fetchTags(botId) {
   });
 }
 
+// The OA Manager admin list, sent with the final batch so PropertyOS can name the admin who wrote
+// each imported note (notes carry the author's bizId). The envelope is unconfirmed — admins were
+// observed as `{ bizId, name, linePictureUri }` objects — so both a bare array and the `{ list }`
+// shape the tags endpoint uses are accepted. Only bizId and name leave this function; the picture
+// URL is dropped. Unusable rows are skipped rather than failing the Sync.
+export async function fetchOwners(botId) {
+  const res = await oamFetch(`/api/v1/bots/${endpointSegment(botId)}/owners`);
+  const data = await res.json();
+  const list = Array.isArray(data)
+    ? data
+    : data && typeof data === "object" && Array.isArray(data.list)
+      ? data.list
+      : null;
+  if (!list) throw new Error("LINE_OAM_OWNERS_INVALID");
+
+  const seen = new Set();
+  const owners = [];
+  for (const owner of list) {
+    if (!owner || typeof owner !== "object") continue;
+    const bizId = owner.bizId;
+    const name = typeof owner.name === "string" ? owner.name.trim() : "";
+    if (!nonEmptyString(bizId) || !name || seen.has(bizId)) continue;
+    seen.add(bizId);
+    owners.push({ bizId, name });
+  }
+  return owners;
+}
+
 // Confirmed with an authenticated sanitized probe (2026-08-11): notes use the same opaque `next`
 // query cursor shape as contacts and members. Every page also reports `total`, which lets us reject
 // a changing, duplicated, or prematurely terminated snapshot instead of deleting unseen notes.

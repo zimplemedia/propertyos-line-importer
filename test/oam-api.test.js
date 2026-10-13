@@ -1025,3 +1025,36 @@ test("fetchChatMembers pages next to exhaustion and normalizes", async () => {
     { userId: "U2", name: "Tukta", nickname: "K.ตุ๊กตา", iconHash: "h2" },
   ]);
 });
+
+test("fetchOwners accepts an array or list envelope, keeps bizId+name, and dedupes", async () => {
+  const { fetchOwners } = await import("../src/oam-api.js");
+  const admins = [
+    { bizId: "B1", name: " Alice ", linePictureUri: "https://x/a.png" },
+    { bizId: "B2", name: "Bob" },
+    { bizId: "B1", name: "Alice again" },
+    { bizId: "", name: "No id" },
+    { bizId: "B3", name: "   " },
+    { bizId: "B4" },
+    null,
+  ];
+  const expected = [
+    { bizId: "B1", name: "Alice" },
+    { bizId: "B2", name: "Bob" },
+  ];
+
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify(admins), { status: 200 });
+  expect(await fetchOwners("B1")).toEqual(expected);
+
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ list: admins }), { status: 200 });
+  expect(await fetchOwners("B1")).toEqual(expected);
+
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ owners: admins }), { status: 200 });
+  await expect(fetchOwners("B1")).rejects.toThrow("LINE_OAM_OWNERS_INVALID");
+
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify("nope"), { status: 200 });
+  await expect(fetchOwners("B1")).rejects.toThrow("LINE_OAM_OWNERS_INVALID");
+});

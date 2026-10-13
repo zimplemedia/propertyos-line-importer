@@ -50,6 +50,7 @@ mock.module("../src/oam-api.js", () => ({
   fetchChatNotes: (...args) => currentApi.fetchChatNotes(...args),
   fetchChatMembers: (...args) => currentApi.fetchChatMembers(...args),
   fetchTags: (...args) => currentApi.fetchTags(...args),
+  fetchOwners: (...args) => currentApi.fetchOwners(...args),
   validateOamSession: (...args) => currentApi.validateOamSession(...args),
 }));
 
@@ -84,6 +85,7 @@ function mockApi({
       updatedAt: 2,
     },
   ],
+  owners = async () => [{ bizId: "admin", name: "Admin" }],
 } = {}) {
   currentApi = {
     resolveOamBotId: async () => botId,
@@ -93,6 +95,7 @@ function mockApi({
     fetchChatNotes: notes,
     fetchChatMembers: members,
     fetchTags: tags,
+    fetchOwners: owners,
     validateOamSession: async () => true,
   };
 }
@@ -620,10 +623,57 @@ test("ping reports the diagnostic extension version", async () => {
 
   expect(await handle({ action: "ping" })).toEqual({
     ok: true,
-    version: "0.4.17",
+    version: "0.4.18",
   });
-  expect(manifest.version).toBe("0.4.17");
-  expect(packageJson.version).toBe("0.4.17");
+  expect(manifest.version).toBe("0.4.18");
+  expect(packageJson.version).toBe("0.4.18");
   expect(manifest.key).toMatch(/^MIIB/);
   expect(listeners).toHaveLength(1);
+});
+
+test("the admin list is fetched once and sent only with the final batch", async () => {
+  let ownerFetches = 0;
+  mockApi({
+    getPage: (token) =>
+      token === null
+        ? { list: [direct("U1")], next: "page-2" }
+        : { list: [direct("U2")], next: null },
+    owners: async (botId) => {
+      ownerFetches += 1;
+      expect(botId).toBe("Ubot");
+      return [{ bizId: "admin", name: "Admin" }];
+    },
+  });
+  const { scrapeOam } = await import("../src/scrape.js");
+
+  const first = await scrapeOam({ basicId: "@x" });
+  expect(first.done).toBe(false);
+  expect(first).not.toHaveProperty("owners");
+  expect(ownerFetches).toBe(0);
+
+  const second = await scrapeOam({ basicId: "@x", cursor: first.cursorOut });
+  expect(second.done).toBe(true);
+  expect(second.owners).toEqual([{ bizId: "admin", name: "Admin" }]);
+  expect(ownerFetches).toBe(1);
+});
+
+test("an admin list failure leaves the final batch successful without owners", async () => {
+  mockApi({
+    pages: { __first__: { list: [direct("U1")], next: null } },
+    owners: async () => {
+      throw new Error("LINE_OAM_OWNERS_INVALID");
+    },
+  });
+  const { scrapeOam } = await import("../src/scrape.js");
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    const result = await scrapeOam({ basicId: "@x" });
+    expect(result.ok).toBe(true);
+    expect(result.done).toBe(true);
+    expect(result.contacts).toHaveLength(1);
+    expect(result).not.toHaveProperty("owners");
+  } finally {
+    console.warn = warn;
+  }
 });
