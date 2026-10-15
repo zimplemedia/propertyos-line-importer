@@ -4,7 +4,8 @@ Imports your LINE Official Account chat history into PropertyOS. Your LINE sessi
 leaves your browser — the extension scrapes `chat.line.biz` locally and sends only the chat data
 to PropertyOS over your logged-in session. Since 0.4.18 the final batch of a Sync also carries the
 OA Manager admin list (bizId and display name only), so PropertyOS can name the admin who wrote an
-imported note.
+imported note. Since 0.4.19 a Sync without the PropertyOS dialog's "Notes" option skips the per-chat
+notes download, which halves the rate-limited requests per chat.
 
 ## Install (developer mode)
 

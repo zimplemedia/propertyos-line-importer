@@ -136,7 +136,7 @@ function normalizeMembers(members) {
   });
 }
 
-async function collectContact({ botId, rawContact, type, light, signal }) {
+async function collectContact({ botId, rawContact, type, light, includeNotes, signal }) {
   const contact = normalizeContact(rawContact, type);
   // A light row (a chat outside a period Sync's window) carries the contact-list data and, for a
   // group, its member list — no history and no notes, the two downloads the rate limit governs.
@@ -167,9 +167,11 @@ async function collectContact({ botId, rawContact, type, light, signal }) {
     };
   }
 
+  // A messages-only Sync (includeNotes false) skips the notes download, one of the two rate-limited
+  // requests per chat; the server treats the empty snapshot as incomplete and applies nothing.
   const [csv, notes, members] = await Promise.all([
     downloadChatCsv(botId, contact.chatId, { signal }),
-    fetchChatNotes(botId, contact.chatId, { signal }),
+    includeNotes ? fetchChatNotes(botId, contact.chatId, { signal }) : Promise.resolve([]),
     type === "GROUP"
       ? fetchChatMembers(botId, contact.chatId, { signal })
       : Promise.resolve(null),
@@ -182,7 +184,7 @@ async function collectContact({ botId, rawContact, type, light, signal }) {
     csv,
     historyComplete: true,
     notes,
-    notesComplete: true,
+    notesComplete: includeNotes,
     ...(type === "GROUP"
       ? { members: normalizeMembers(members), rosterComplete: true }
       : {}),
@@ -194,7 +196,7 @@ async function collectContact({ botId, rawContact, type, light, signal }) {
  * passes through oam-api's authoritative network limiter; the final fold preserves source order
  * regardless of which download finishes first.
  */
-async function collectPlanned({ planned, botId }) {
+async function collectPlanned({ planned, botId, includeNotes }) {
   let firstError = null;
   const controller = new AbortController();
 
@@ -207,6 +209,7 @@ async function collectPlanned({ planned, botId }) {
           rawContact: entry.rawContact,
           type: entry.type,
           light: entry.outsidePeriod,
+          includeNotes,
           signal: controller.signal,
         });
         entry.fetched = true;
@@ -291,6 +294,7 @@ export async function scrapeOam({
   cursor = null,
   includeTagCatalog = false,
   since = null,
+  includeNotes = true,
 }) {
   const endCsvScrapeCycle = beginCsvScrapeCycle();
   try {
@@ -396,7 +400,7 @@ export async function scrapeOam({
       planned.push({ type, rawContact, outsidePeriod });
     }
 
-    await collectPlanned({ planned, botId });
+    await collectPlanned({ planned, botId, includeNotes: includeNotes !== false });
 
     // Fold results back in source order so the staged payload and acknowledged cursor are stable even
     // though the per-contact requests completed concurrently.

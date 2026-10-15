@@ -348,6 +348,32 @@ test("a period scrape sends old chats as light rows: profile, tags and group mem
   expect(memberCalls.sort()).toEqual(["C-new", "C-old"]);
 });
 
+test("a messages-only scrape (includeNotes false) downloads history but never notes, and says so", async () => {
+  const noteCalls = [];
+  mockApi({
+    pages: {
+      __first__: { list: [direct("U-chat"), group("C-chat")], next: null },
+    },
+    notes: async (...args) => {
+      noteCalls.push(args);
+      return [];
+    },
+  });
+  const { scrapeOam } = await import("../src/scrape.js");
+
+  const batch = await scrapeOam({ basicId: "@x", includeNotes: false });
+  expect(noteCalls).toEqual([]);
+  expect(batch.contacts.map((contact) => [contact.chatId, contact.historyComplete, contact.notes, contact.notesComplete])).toEqual([
+    ["U-chat", true, [], false],
+    ["C-chat", true, [], false],
+  ]);
+  expect(batch.contacts.every((contact) => typeof contact.csv === "string")).toBe(true);
+
+  // Default: notes are fetched as before.
+  await scrapeOam({ basicId: "@x" });
+  expect(noteCalls.length).toBe(2);
+});
+
 test("a full scrape (no since) is unchanged and a malformed since is refused", async () => {
   mockApi({
     pages: {
@@ -623,10 +649,10 @@ test("ping reports the diagnostic extension version", async () => {
 
   expect(await handle({ action: "ping" })).toEqual({
     ok: true,
-    version: "0.4.18",
+    version: "0.4.19",
   });
-  expect(manifest.version).toBe("0.4.18");
-  expect(packageJson.version).toBe("0.4.18");
+  expect(manifest.version).toBe("0.4.19");
+  expect(packageJson.version).toBe("0.4.19");
   expect(manifest.key).toMatch(/^MIIB/);
   expect(listeners).toHaveLength(1);
 });
