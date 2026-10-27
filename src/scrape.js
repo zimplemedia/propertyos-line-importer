@@ -5,6 +5,7 @@ import {
   fetchChatNotes,
   fetchContactsPage,
   fetchOwners,
+  fetchSavedReplies,
   fetchTags,
   resolveOamBotId,
 } from "./oam-api.js";
@@ -274,6 +275,7 @@ function safeError(error) {
     "LINE_OAM_NOTES_INCOMPLETE",
     "LINE_OAM_NOTES_INVALID",
     "LINE_OAM_RATE_LIMITED",
+    "LINE_OAM_SAVED_REPLIES_INVALID",
     "LINE_OAM_TAGS_INVALID",
   ]);
   const matched = [...allowlisted].find((candidate) =>
@@ -295,6 +297,7 @@ export async function scrapeOam({
   includeTagCatalog = false,
   since = null,
   includeNotes = true,
+  includePresets = false,
 }) {
   const endCsvScrapeCycle = beginCsvScrapeCycle();
   try {
@@ -316,6 +319,11 @@ export async function scrapeOam({
     const botId = state.botId;
     const batchId = await batchIdFor(cursorIn, state.sequence);
     const tagCatalog = includeTagCatalog ? await fetchTags(botId) : undefined;
+    // LINE OA's saved replies (PropertyOS message presets), asked for on the first batch of a Sync that
+    // applies them, the same way as the tag catalog.
+    const savedReplies = includePresets
+      ? await fetchSavedReplies(botId)
+      : undefined;
     const page = await fetchContactsPage(botId, state.pageToken);
     if (
       !page ||
@@ -376,6 +384,7 @@ export async function scrapeOam({
         done: position.done,
         botId,
         ...(tagCatalog ? { tagCatalog } : {}),
+        ...(savedReplies ? { savedReplies } : {}),
         ...(owners ? { owners } : {}),
         contacts: candidateContacts,
         unsupportedRoomCount: roomCount,

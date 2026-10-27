@@ -5,7 +5,10 @@ leaves your browser — the extension scrapes `chat.line.biz` locally and sends 
 to PropertyOS over your logged-in session. Since 0.4.18 the final batch of a Sync also carries the
 OA Manager admin list (bizId and display name only), so PropertyOS can name the admin who wrote an
 imported note. Since 0.4.19 a Sync without the PropertyOS dialog's "Notes" option skips the per-chat
-notes download, which halves the rate-limited requests per chat.
+notes download, which halves the rate-limited requests per chat. Since 0.4.20 the dialog's fourth
+option, "Message presets", makes the first batch of a Sync also carry the OA's saved replies (id,
+title, text, emojis, favourite and list position), which PropertyOS keeps as that account's message
+presets; without it the saved replies are not read at all.
 
 ## Install (developer mode)
 
