@@ -5,6 +5,7 @@ import {
   fetchChatNotes,
   fetchContactsPage,
   fetchOwners,
+  fetchSavedReplies,
   fetchTags,
   resolveOamBotId,
 } from "./oam-api.js";
@@ -274,6 +275,7 @@ function safeError(error) {
     "LINE_OAM_NOTES_INCOMPLETE",
     "LINE_OAM_NOTES_INVALID",
     "LINE_OAM_RATE_LIMITED",
+    "LINE_OAM_SAVED_REPLIES_INVALID",
     "LINE_OAM_TAGS_INVALID",
   ]);
   const matched = [...allowlisted].find((candidate) =>
@@ -295,6 +297,8 @@ export async function scrapeOam({
   includeTagCatalog = false,
   since = null,
   includeNotes = true,
+  includePresets = false,
+  catalogueOnly = false,
 }) {
   const endCsvScrapeCycle = beginCsvScrapeCycle();
   try {
@@ -316,6 +320,27 @@ export async function scrapeOam({
     const botId = state.botId;
     const batchId = await batchIdFor(cursorIn, state.sequence);
     const tagCatalog = includeTagCatalog ? await fetchTags(botId) : undefined;
+    // LINE OA's saved replies (PropertyOS message presets), asked for on the first batch of a Sync that
+    // applies them, the same way as the tag catalog.
+    const savedReplies = includePresets
+      ? await fetchSavedReplies(botId)
+      : undefined;
+    // A catalogue-only scrape (the presets card's own Sync) wants the OA's saved replies and nothing
+    // per chat: one done batch with no contacts, so the run never walks, downloads or reconciles a chat.
+    if (catalogueOnly && includePresets && !cursorIn) {
+      return {
+        ok: true,
+        batchId,
+        cursorIn,
+        cursorOut: null,
+        done: true,
+        botId,
+        ...(tagCatalog ? { tagCatalog } : {}),
+        savedReplies,
+        contacts: [],
+        unsupportedRoomCount: 0,
+      };
+    }
     const page = await fetchContactsPage(botId, state.pageToken);
     if (
       !page ||
@@ -376,6 +401,7 @@ export async function scrapeOam({
         done: position.done,
         botId,
         ...(tagCatalog ? { tagCatalog } : {}),
+        ...(savedReplies ? { savedReplies } : {}),
         ...(owners ? { owners } : {}),
         contacts: candidateContacts,
         unsupportedRoomCount: roomCount,

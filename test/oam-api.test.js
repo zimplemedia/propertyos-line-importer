@@ -1058,3 +1058,101 @@ test("fetchOwners accepts an array or list envelope, keeps bizId+name, and dedup
     new Response(JSON.stringify("nope"), { status: 200 });
   await expect(fetchOwners("B1")).rejects.toThrow("LINE_OAM_OWNERS_INVALID");
 });
+
+// The saved-replies envelope ({ list, total, totalFavorites }) and the savedReplyId are from the plan's
+// probe of the OA Manager; the item fields below are the assumed shape, not a captured response.
+const savedReply = (id, overrides = {}) => ({
+  savedReplyId: id,
+  title: `Title ${id}`,
+  message: { type: "text", text: `Text ${id}`, emojis: [] },
+  isFavorite: false,
+  ...overrides,
+});
+
+test("fetchSavedReplies pages through every saved reply, newest first, and maps the allowlisted fields", async () => {
+  const { fetchSavedReplies } = await import("../src/oam-api.js");
+  const emojis = [{ index: 0, productId: "p1", emojiId: "001" }];
+  const pages = {
+    1: [
+      savedReply("sr-3", {
+        isFavorite: true,
+        message: { type: "text", text: "$ Hi", emojis },
+        secret: "drop-me",
+      }),
+      savedReply("sr-2"),
+    ],
+    2: [
+      savedReply("sr-2"),
+      savedReply("sr-1", { message: { type: "text", text: "Plain" } }),
+    ],
+  };
+  const urls = [];
+  globalThis.fetch = async (url) => {
+    urls.push(String(url));
+    const page = Number(new URL(url).searchParams.get("page"));
+    return new Response(
+      JSON.stringify({ list: pages[page] ?? [], total: 3, totalFavorites: 1 }),
+      { status: 200 },
+    );
+  };
+
+  const mapped = (id, order, overrides) => ({
+    platformPresetId: id,
+    title: `Title ${id}`,
+    text: `Text ${id}`,
+    emojis: [],
+    isFavorite: false,
+    order,
+    ...overrides,
+  });
+  expect(await fetchSavedReplies("B1")).toEqual([
+    mapped("sr-3", 0, { text: "$ Hi", emojis, isFavorite: true }),
+    mapped("sr-2", 1),
+    mapped("sr-1", 2, { text: "Plain" }),
+  ]);
+  const endpoint =
+    "https://chat.line.biz/api/v2/bots/B1/savedReplies?query=" +
+    "&excludeUsernamePlaceholder=false&sortKey=CREATED_AT&pageSize=100";
+  expect(urls).toEqual([`${endpoint}&page=1`, `${endpoint}&page=2`]);
+});
+
+test("fetchSavedReplies refuses an unexpected envelope, a bad reply, or a list that stops short of its total", async () => {
+  const { fetchSavedReplies } = await import("../src/oam-api.js");
+  const respond = (byPage) => {
+    globalThis.fetch = async (url) => {
+      const page = Number(new URL(url).searchParams.get("page"));
+      return new Response(JSON.stringify(byPage(page)), { status: 200 });
+    };
+  };
+  const invalid = "LINE_OAM_SAVED_REPLIES_INVALID";
+
+  respond(() => [savedReply("sr-1")]);
+  await expect(fetchSavedReplies("B1")).rejects.toThrow(invalid);
+  respond(() => ({
+    list: [savedReply("sr-1")],
+    total: "1",
+    totalFavorites: 0,
+  }));
+  await expect(fetchSavedReplies("B1")).rejects.toThrow(invalid);
+  respond(() => ({ list: [savedReply("")], total: 1, totalFavorites: 0 }));
+  await expect(fetchSavedReplies("B1")).rejects.toThrow(invalid);
+  respond(() => ({
+    list: [savedReply("sr-1", { message: { type: "image" } })],
+    total: 1,
+    totalFavorites: 0,
+  }));
+  await expect(fetchSavedReplies("B1")).rejects.toThrow(invalid);
+  // Short: page 2 is empty while the total says 3.
+  respond((page) => ({
+    list: page === 1 ? [savedReply("sr-1"), savedReply("sr-2")] : [],
+    total: 3,
+    totalFavorites: 0,
+  }));
+  await expect(fetchSavedReplies("B1")).rejects.toThrow(invalid);
+  // A server that ignores `page` repeats page 1 forever; a page with nothing new ends the walk.
+  respond(() => ({ list: [savedReply("sr-1")], total: 2, totalFavorites: 0 }));
+  await expect(fetchSavedReplies("B1")).rejects.toThrow(invalid);
+
+  respond(() => ({ list: [], total: 0, totalFavorites: 0 }));
+  expect(await fetchSavedReplies("B1")).toEqual([]);
+});

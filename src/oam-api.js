@@ -386,6 +386,82 @@ export async function fetchTags(botId) {
   });
 }
 
+const SAVED_REPLIES_PAGE_SIZE = 100;
+
+const savedRepliesInvalid = () => new Error("LINE_OAM_SAVED_REPLIES_INVALID");
+
+// One saved reply, reduced to the fields PropertyOS keeps. Shape observed live on 2026-10-28:
+// { savedReplyId, title, message: { type: "text", text, emojis }, isFavorite }, pages numbered from 1.
+function normalizeSavedReply(reply, order) {
+  const message = reply?.message;
+  const isFavorite = reply?.isFavorite;
+  if (
+    !reply ||
+    typeof reply !== "object" ||
+    !nonEmptyString(reply.savedReplyId) ||
+    typeof reply.title !== "string" ||
+    !message ||
+    typeof message !== "object" ||
+    (message.type !== undefined && message.type !== "text") ||
+    typeof message.text !== "string" ||
+    !(message.emojis === undefined || Array.isArray(message.emojis)) ||
+    typeof isFavorite !== "boolean"
+  ) {
+    throw savedRepliesInvalid();
+  }
+  return {
+    platformPresetId: reply.savedReplyId,
+    title: reply.title,
+    text: message.text,
+    emojis: message.emojis ?? [],
+    isFavorite,
+    order,
+  };
+}
+
+/**
+ * Every saved reply of the OA, newest first (CREATED_AT), as the page-numbered endpoint returns them.
+ * The walk stops at an empty page or once `total` replies are in; a page that adds nothing new (a
+ * server ignoring `page`) or a walk that ends short of `total` fails rather than send a partial list,
+ * because PropertyOS deletes the synced presets missing from it. `order` is the position in that list.
+ */
+export async function fetchSavedReplies(botId) {
+  const replies = new Map();
+  let total = null;
+  for (let page = 1; total === null || replies.size < total; page += 1) {
+    const res = await oamFetch(
+      `/api/v2/bots/${endpointSegment(botId)}/savedReplies?query=` +
+        "&excludeUsernamePlaceholder=false&sortKey=CREATED_AT" +
+        `&pageSize=${SAVED_REPLIES_PAGE_SIZE}&page=${page}`,
+    );
+    const data = await res.json();
+    if (
+      !data ||
+      typeof data !== "object" ||
+      Array.isArray(data) ||
+      !Array.isArray(data.list) ||
+      !Number.isSafeInteger(data.total) ||
+      data.total < 0 ||
+      !Number.isSafeInteger(data.totalFavorites) ||
+      (total !== null && data.total !== total)
+    ) {
+      throw savedRepliesInvalid();
+    }
+    total = data.total;
+    if (data.list.length === 0) break;
+    const before = replies.size;
+    for (const reply of data.list) {
+      const normalized = normalizeSavedReply(reply, replies.size);
+      if (!replies.has(normalized.platformPresetId)) {
+        replies.set(normalized.platformPresetId, normalized);
+      }
+    }
+    if (replies.size === before) throw savedRepliesInvalid();
+  }
+  if (replies.size !== total) throw savedRepliesInvalid();
+  return [...replies.values()];
+}
+
 // The OA Manager admin list, sent with the final batch so PropertyOS can name the admin who wrote
 // each imported note (notes carry the author's bizId). The envelope is unconfirmed — admins were
 // observed as `{ bizId, name, linePictureUri }` objects — so both a bare array and the `{ list }`
