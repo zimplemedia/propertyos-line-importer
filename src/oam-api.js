@@ -390,12 +390,11 @@ const SAVED_REPLIES_PAGE_SIZE = 100;
 
 const savedRepliesInvalid = () => new Error("LINE_OAM_SAVED_REPLIES_INVALID");
 
-// One saved reply, reduced to the fields PropertyOS keeps. Only the envelope and savedReplyId were seen
-// on the live endpoint; the item fields are the expected shape: the text message as `message`
-// ({ type: "text", text, emojis }) and the favourite flag as `favorite` (or `isFavorite`).
+// One saved reply, reduced to the fields PropertyOS keeps. Shape observed live on 2026-10-28:
+// { savedReplyId, title, message: { type: "text", text, emojis }, isFavorite }, pages numbered from 1.
 function normalizeSavedReply(reply, order) {
   const message = reply?.message;
-  const isFavorite = reply?.favorite ?? reply?.isFavorite;
+  const isFavorite = reply?.isFavorite;
   if (
     !reply ||
     typeof reply !== "object" ||

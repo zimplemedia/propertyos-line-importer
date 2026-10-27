@@ -1065,7 +1065,7 @@ const savedReply = (id, overrides = {}) => ({
   savedReplyId: id,
   title: `Title ${id}`,
   message: { type: "text", text: `Text ${id}`, emojis: [] },
-  favorite: false,
+  isFavorite: false,
   ...overrides,
 });
 
@@ -1075,7 +1075,7 @@ test("fetchSavedReplies pages through every saved reply, newest first, and maps 
   const pages = {
     1: [
       savedReply("sr-3", {
-        favorite: true,
+        isFavorite: true,
         message: { type: "text", text: "$ Hi", emojis },
         secret: "drop-me",
       }),
