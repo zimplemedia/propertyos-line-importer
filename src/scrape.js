@@ -298,6 +298,7 @@ export async function scrapeOam({
   since = null,
   includeNotes = true,
   includePresets = false,
+  catalogueOnly = false,
 }) {
   const endCsvScrapeCycle = beginCsvScrapeCycle();
   try {
@@ -324,6 +325,22 @@ export async function scrapeOam({
     const savedReplies = includePresets
       ? await fetchSavedReplies(botId)
       : undefined;
+    // A catalogue-only scrape (the presets card's own Sync) wants the OA's saved replies and nothing
+    // per chat: one done batch with no contacts, so the run never walks, downloads or reconciles a chat.
+    if (catalogueOnly && includePresets && !cursorIn) {
+      return {
+        ok: true,
+        batchId,
+        cursorIn,
+        cursorOut: null,
+        done: true,
+        botId,
+        ...(tagCatalog ? { tagCatalog } : {}),
+        savedReplies,
+        contacts: [],
+        unsupportedRoomCount: 0,
+      };
+    }
     const page = await fetchContactsPage(botId, state.pageToken);
     if (
       !page ||

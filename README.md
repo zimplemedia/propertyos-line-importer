@@ -8,7 +8,9 @@ imported note. Since 0.4.19 a Sync without the PropertyOS dialog's "Notes" optio
 notes download, which halves the rate-limited requests per chat. Since 0.4.20 the dialog's fourth
 option, "Message presets", makes the first batch of a Sync also carry the OA's saved replies (id,
 title, text, emojis, favourite and list position), which PropertyOS keeps as that account's message
-presets; without it the saved replies are not read at all.
+presets; without it the saved replies are not read at all. Since 0.4.21 the Chat presets card's
+"Sync from LINE OA" button asks for the saved replies alone (`catalogueOnly`): one batch with no
+contacts, so no chat, note or tag is downloaded.
 
 ## Install (developer mode)
 

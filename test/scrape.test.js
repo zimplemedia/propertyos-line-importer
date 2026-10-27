@@ -661,10 +661,10 @@ test("ping reports the diagnostic extension version", async () => {
 
   expect(await handle({ action: "ping" })).toEqual({
     ok: true,
-    version: "0.4.20",
+    version: "0.4.21",
   });
-  expect(manifest.version).toBe("0.4.20");
-  expect(packageJson.version).toBe("0.4.20");
+  expect(manifest.version).toBe("0.4.21");
+  expect(packageJson.version).toBe("0.4.21");
   expect(manifest.key).toMatch(/^MIIB/);
   expect(listeners).toHaveLength(1);
 });
@@ -773,4 +773,81 @@ test("a saved-replies failure fails the batch with its own code", async () => {
     ok: false,
     error: "LINE_OAM_SAVED_REPLIES_INVALID",
   });
+});
+
+test("a catalogue-only scrape returns the saved replies in one done batch without walking contacts", async () => {
+  const calls = { pages: 0, notes: 0, csv: 0, owners: 0, tags: 0 };
+  mockApi({
+    pages: { __first__: { list: [direct("U1")], next: "page-2" } },
+  });
+  const api = currentApi;
+  currentApi = {
+    ...api,
+    fetchContactsPage: async (...args) => {
+      calls.pages += 1;
+      return api.fetchContactsPage(...args);
+    },
+    fetchChatNotes: async (...args) => {
+      calls.notes += 1;
+      return api.fetchChatNotes(...args);
+    },
+    downloadChatCsv: async (...args) => {
+      calls.csv += 1;
+      return api.downloadChatCsv(...args);
+    },
+    fetchOwners: async (...args) => {
+      calls.owners += 1;
+      return api.fetchOwners(...args);
+    },
+    fetchTags: async (...args) => {
+      calls.tags += 1;
+      return api.fetchTags(...args);
+    },
+  };
+  const { scrapeOam } = await import("../src/scrape.js");
+
+  const result = await scrapeOam({
+    basicId: "@x",
+    catalogueOnly: true,
+    includePresets: true,
+  });
+  expect(result).toEqual({
+    ok: true,
+    batchId: expect.stringMatching(/^oam-0-[0-9a-f]{32}$/),
+    cursorIn: null,
+    cursorOut: null,
+    done: true,
+    botId: "Ubot",
+    savedReplies: [
+      {
+        platformPresetId: "sr-1",
+        title: "Hello",
+        text: "Hello!",
+        emojis: [],
+        isFavorite: false,
+        order: 0,
+      },
+    ],
+    contacts: [],
+    unsupportedRoomCount: 0,
+  });
+  expect(calls).toEqual({ pages: 0, notes: 0, csv: 0, owners: 0, tags: 0 });
+
+  const withTags = await scrapeOam({
+    basicId: "@x",
+    catalogueOnly: true,
+    includePresets: true,
+    includeTagCatalog: true,
+  });
+  expect(withTags.tagCatalog).toHaveLength(1);
+  expect(withTags.contacts).toEqual([]);
+  expect(calls).toEqual({ pages: 0, notes: 0, csv: 0, owners: 0, tags: 1 });
+});
+
+test("catalogueOnly without includePresets is an ordinary scrape", async () => {
+  mockApi({ pages: { __first__: { list: [direct("U1")], next: null } } });
+  const { scrapeOam } = await import("../src/scrape.js");
+  const result = await scrapeOam({ basicId: "@x", catalogueOnly: true });
+  expect(result.ok).toBe(true);
+  expect(result.contacts).toHaveLength(1);
 });
