@@ -17,14 +17,19 @@ const finiteNumberOrNull = (value) =>
 
 const encodeCursor = (value) => btoa(JSON.stringify(value));
 
+// A cursor without `filterKey` walks the ALL list (every cursor before 0.4.22, and every ALL-phase
+// cursor since); `filterKey: "SPAM"` is the second phase, the contacts OA Manager keeps out of ALL.
+const CURSOR_KEYS = "botId,pageToken,processedContactIds,sequence";
+const SPAM_CURSOR_KEYS = "botId,filterKey,pageToken,processedContactIds,sequence";
+
 function decodeCursor(cursor) {
   try {
     const value = JSON.parse(atob(cursor));
+    const keys = value && typeof value === "object" ? Object.keys(value).sort().join(",") : "";
     if (
       !value ||
       typeof value !== "object" ||
-      Object.keys(value).sort().join(",") !==
-        "botId,pageToken,processedContactIds,sequence" ||
+      !(keys === CURSOR_KEYS || (keys === SPAM_CURSOR_KEYS && value.filterKey === "SPAM")) ||
       !nonEmptyString(value.botId) ||
       !(value.pageToken === null || nonEmptyString(value.pageToken)) ||
       !Array.isArray(value.processedContactIds) ||
@@ -37,11 +42,22 @@ function decodeCursor(cursor) {
     ) {
       throw new Error("invalid cursor");
     }
-    return value;
+    return { ...value, filterKey: value.filterKey ?? "ALL" };
   } catch {
     throw new Error("LINE_OAM_CURSOR_INVALID");
   }
 }
+
+// The SPAM phase is spelled out in the cursor; the ALL phase is the legacy shape, so a Sync that
+// straddles an extension update resumes unchanged.
+const phaseCursor = ({ botId, filterKey, pageToken, processedContactIds, sequence }) =>
+  encodeCursor({
+    botId,
+    ...(filterKey === "SPAM" ? { filterKey } : {}),
+    pageToken,
+    processedContactIds,
+    sequence,
+  });
 
 async function batchIdFor(cursorIn, sequence) {
   const material = `${sequence}\n${cursorIn ?? "<FIRST_BATCH>"}`;
@@ -231,18 +247,37 @@ async function collectPlanned({ planned, botId, includeNotes }) {
 
 function cursorAfterPage({
   botId,
+  filterKey,
   currentPageToken,
   nextPageToken,
   pageIds,
   processedIds,
   sequence,
+  spamAhead,
 }) {
   const processed = new Set(processedIds);
   if (pageIds.every((id) => processed.has(id))) {
-    if (!nextPageToken) return { cursorOut: null, done: true };
+    if (!nextPageToken) {
+      // The ALL list is done. OA Manager keeps spam-marked chats out of it, so they are walked as a
+      // second phase from the SPAM list — only when there is one, so an OA without spam ends here.
+      if (filterKey === "ALL" && spamAhead) {
+        return {
+          cursorOut: phaseCursor({
+            botId,
+            filterKey: "SPAM",
+            pageToken: null,
+            processedContactIds: [],
+            sequence: sequence + 1,
+          }),
+          done: false,
+        };
+      }
+      return { cursorOut: null, done: true };
+    }
     return {
-      cursorOut: encodeCursor({
+      cursorOut: phaseCursor({
         botId,
+        filterKey,
         pageToken: nextPageToken,
         processedContactIds: [],
         sequence: sequence + 1,
@@ -251,8 +286,9 @@ function cursorAfterPage({
     };
   }
   return {
-    cursorOut: encodeCursor({
+    cursorOut: phaseCursor({
       botId,
+      filterKey,
       pageToken: currentPageToken,
       processedContactIds: processedIds,
       sequence: sequence + 1,
@@ -313,6 +349,7 @@ export async function scrapeOam({
       ? decodeCursor(cursorIn)
       : {
           botId: await resolveOamBotId(basicId),
+          filterKey: "ALL",
           pageToken: null,
           processedContactIds: [],
           sequence: 0,
@@ -341,7 +378,7 @@ export async function scrapeOam({
         unsupportedRoomCount: 0,
       };
     }
-    const page = await fetchContactsPage(botId, state.pageToken);
+    const page = await fetchContactsPage(botId, state.pageToken, state.filterKey);
     if (
       !page ||
       !Array.isArray(page.list) ||
@@ -361,6 +398,13 @@ export async function scrapeOam({
       throw new Error("LINE_OAM_CONTACT_INVALID");
     }
 
+    // On the ALL list's last page, look at the SPAM list once: a non-empty first page means a second
+    // phase follows; an empty one lets this batch be the final one, as before spam was walked at all.
+    const spamAhead =
+      state.filterKey === "ALL" && !page.next
+        ? (await fetchContactsPage(botId, null, "SPAM")).list.length > 0
+        : false;
+
     const acknowledged = new Set(state.processedContactIds);
     const processedIds = [...state.processedContactIds];
     const contacts = [];
@@ -373,11 +417,13 @@ export async function scrapeOam({
     ) => {
       const position = cursorAfterPage({
         botId,
+        filterKey: state.filterKey,
         currentPageToken: state.pageToken,
         nextPageToken: page.next ?? null,
         pageIds,
         processedIds: candidateProcessedIds,
         sequence: state.sequence,
+        spamAhead,
       });
       // The admin list rides along with the final batch only — once per Sync. It is a nice-to-have
       // (note authors fall back to the agency name server-side), so a failure must not fail a batch
