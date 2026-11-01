@@ -311,14 +311,21 @@ export async function resolveOamBotId(basicId) {
   return bot.botId || bot.id;
 }
 
-export async function fetchContactsPage(botId, pageToken) {
+// The contact lists a Sync walks. ALL is every contact EXCEPT the ones marked as spam in OA Manager
+// (verified 2026-11-01: 23,290 rows, none with spam=true); those come only from SPAM.
+export const CONTACT_FILTER_KEYS = ["ALL", "SPAM"];
+
+export async function fetchContactsPage(botId, pageToken, filterKey = "ALL") {
+  if (!CONTACT_FILTER_KEYS.includes(filterKey)) {
+    throw new Error("LINE_OAM_CONTACT_INVALID");
+  }
   const qs = new URLSearchParams({
     query: "",
     // Oldest activity first: a new message moves a contact forward into work we have not scanned
     // yet, instead of behind the cursor.
     sortKey: "LAST_TALKED_AT",
     sortOrder: "ASC",
-    filterKey: "ALL",
+    filterKey,
     limit: "100",
   });
   if (pageToken) qs.set("next", pageToken);

@@ -97,11 +97,17 @@ function mockApi({
       order: 0,
     },
   ],
+  // The SPAM list, walked after ALL ends. Empty by default: most OAs have no spam.
+  spamPages = () => ({ list: [], next: null }),
 } = {}) {
   currentApi = {
     resolveOamBotId: async () => botId,
-    fetchContactsPage: async (_bot, token) =>
-      getPage ? getPage(token ?? null) : pages[token || "__first__"],
+    fetchContactsPage: async (_bot, token, filterKey = "ALL") =>
+      filterKey === "SPAM"
+        ? spamPages(token ?? null)
+        : getPage
+          ? getPage(token ?? null)
+          : pages[token || "__first__"],
     downloadChatCsv: csv,
     fetchChatNotes: notes,
     fetchChatMembers: members,
@@ -147,6 +153,53 @@ test("worker-cache loss resumes from the next server-owned LINE page cursor", as
   expect(second.done).toBe(true);
   expect(second.cursorOut).toBeNull();
   expect(pageFetches).toBe(2);
+});
+
+test("spam-marked contacts, absent from ALL, are walked from the SPAM list after ALL ends", async () => {
+  const fetches = [];
+  mockApi({
+    getPage: (token) => {
+      fetches.push(["ALL", token]);
+      return { list: [direct("U1")], next: null };
+    },
+    spamPages: (token) => {
+      fetches.push(["SPAM", token]);
+      return token === null
+        ? { list: [{ ...direct("U-spam-1"), spam: true }], next: "spam-2" }
+        : { list: [{ ...direct("U-spam-2"), spam: true }], next: null };
+    },
+  });
+  const { scrapeOam } = await import("../src/scrape.js");
+
+  const first = await scrapeOam({ basicId: "@x" });
+  expect(first.contacts.map((contact) => contact.chatId)).toEqual(["U1"]);
+  expect(first.done).toBe(false);
+  expect(decodeCursor(first.cursorOut)).toEqual({
+    botId: "Ubot",
+    filterKey: "SPAM",
+    pageToken: null,
+    processedContactIds: [],
+    sequence: 1,
+  });
+
+  const second = await scrapeOam({ basicId: "@x", cursor: first.cursorOut });
+  expect(second.contacts.map((contact) => [contact.chatId, contact.oamState.spam])).toEqual([
+    ["U-spam-1", true],
+  ]);
+  expect(second.done).toBe(false);
+  expect(decodeCursor(second.cursorOut)).toMatchObject({ filterKey: "SPAM", pageToken: "spam-2" });
+
+  const third = await scrapeOam({ basicId: "@x", cursor: second.cursorOut });
+  expect(third.contacts.map((contact) => contact.chatId)).toEqual(["U-spam-2"]);
+  expect(third.done).toBe(true);
+  expect(third.cursorOut).toBeNull();
+  // ALL once, a peek at SPAM when ALL ended, then the SPAM pages themselves.
+  expect(fetches).toEqual([
+    ["ALL", null],
+    ["SPAM", null],
+    ["SPAM", null],
+    ["SPAM", "spam-2"],
+  ]);
 });
 
 test("an all-no-chat page returns every person without history, notes, or roster calls", async () => {
@@ -661,10 +714,10 @@ test("ping reports the diagnostic extension version", async () => {
 
   expect(await handle({ action: "ping" })).toEqual({
     ok: true,
-    version: "0.4.21",
+    version: "0.4.22",
   });
-  expect(manifest.version).toBe("0.4.21");
-  expect(packageJson.version).toBe("0.4.21");
+  expect(manifest.version).toBe("0.4.22");
+  expect(packageJson.version).toBe("0.4.22");
   expect(manifest.key).toMatch(/^MIIB/);
   expect(listeners).toHaveLength(1);
 });
