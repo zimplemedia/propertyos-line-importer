@@ -439,6 +439,117 @@ test("a messages-only scrape (includeNotes false) downloads history but never no
   expect(noteCalls.length).toBe(2);
 });
 
+test("a scrape with Messages off (includeHistory false) downloads no history, notes when asked, and group rosters", async () => {
+  const csvCalls = [];
+  const noteCalls = [];
+  const memberCalls = [];
+  mockApi({
+    pages: {
+      __first__: {
+        list: [
+          { ...direct("U-chat"), followedUp: true },
+          group("C-chat"),
+          direct("U-no-chat", { chatExists: false }),
+          room("R-room"),
+        ],
+        next: null,
+      },
+    },
+    csv: (_botId, chatId) => {
+      csvCalls.push(chatId);
+      return `csv-${chatId}`;
+    },
+    notes: async (_botId, chatId) => {
+      noteCalls.push(chatId);
+      return [
+        {
+          noteId: `note-${chatId}`,
+          body: "sanitized",
+          userBizId: "admin",
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      ];
+    },
+    members: async (_botId, chatId) => {
+      memberCalls.push(chatId);
+      return [{ userId: `U-in-${chatId}`, name: "Member", nickname: null, iconHash: null }];
+    },
+  });
+  const { scrapeOam } = await import("../src/scrape.js");
+
+  const batch = await scrapeOam({ basicId: "@x", includeHistory: false });
+  expect(csvCalls).toEqual([]);
+  expect(noteCalls.sort()).toEqual(["C-chat", "U-chat"]);
+  expect(memberCalls).toEqual(["C-chat"]);
+  const [chat, groupChat, noChat] = batch.contacts;
+  expect(chat).toMatchObject({
+    chatExists: true,
+    csv: null,
+    historyComplete: false,
+    notes: [{ noteId: "note-U-chat" }],
+    notesComplete: true,
+    oamState: { followedUp: true },
+  });
+  expect(groupChat).toMatchObject({
+    chatExists: true,
+    csv: null,
+    historyComplete: false,
+    notes: [{ noteId: "note-C-chat" }],
+    notesComplete: true,
+    members: [{ externalId: "U-in-C-chat", name: "Member", nickname: null, iconHash: null }],
+    rosterComplete: true,
+  });
+  expect(noChat).toMatchObject({ chatExists: false, csv: null, notes: [], notesComplete: false });
+  expect(batch.contacts).toHaveLength(3);
+  expect(batch.unsupportedRoomCount).toBe(1);
+
+  // With Notes off too, nothing but the roster is downloaded.
+  csvCalls.length = 0;
+  noteCalls.length = 0;
+  const bare = await scrapeOam({ basicId: "@x", includeHistory: false, includeNotes: false });
+  expect(csvCalls).toEqual([]);
+  expect(noteCalls).toEqual([]);
+  expect(bare.contacts.slice(0, 2).map((contact) => [contact.csv, contact.notes, contact.notesComplete])).toEqual([
+    [null, [], false],
+    [null, [], false],
+  ]);
+  expect(bare.contacts[1].rosterComplete).toBe(true);
+});
+
+test("a scrape with Messages off and a period downloads notes only for chats inside the period", async () => {
+  const csvCalls = [];
+  const noteCalls = [];
+  const at = (contact, lastTalkedAt) => ({ ...contact, lastTalkedAt });
+  mockApi({
+    pages: {
+      __first__: {
+        list: [at(direct("U-old"), 1000), at(group("C-new"), 5000), at(direct("U-edge"), 3000)],
+        next: null,
+      },
+    },
+    csv: (_botId, chatId) => {
+      csvCalls.push(chatId);
+      return `csv-${chatId}`;
+    },
+    notes: async (_botId, chatId) => {
+      noteCalls.push(chatId);
+      return [];
+    },
+  });
+  const { scrapeOam } = await import("../src/scrape.js");
+
+  const batch = await scrapeOam({ basicId: "@x", since: 3000, includeHistory: false });
+  expect(csvCalls).toEqual([]);
+  expect(noteCalls.sort()).toEqual(["C-new", "U-edge"]);
+  expect(batch.contacts.map((contact) => [contact.chatId, contact.csv, contact.notesComplete])).toEqual([
+    ["U-old", null, false],
+    ["C-new", null, true],
+    ["U-edge", null, true],
+  ]);
+  expect(batch.contacts[1].rosterComplete).toBe(true);
+});
+
 test("a full scrape (no since) is unchanged and a malformed since is refused", async () => {
   mockApi({
     pages: {
@@ -714,10 +825,10 @@ test("ping reports the diagnostic extension version", async () => {
 
   expect(await handle({ action: "ping" })).toEqual({
     ok: true,
-    version: "0.4.22",
+    version: "0.4.23",
   });
-  expect(manifest.version).toBe("0.4.22");
-  expect(packageJson.version).toBe("0.4.22");
+  expect(manifest.version).toBe("0.4.23");
+  expect(packageJson.version).toBe("0.4.23");
   expect(manifest.key).toMatch(/^MIIB/);
   expect(listeners).toHaveLength(1);
 });
