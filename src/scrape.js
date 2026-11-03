@@ -155,19 +155,26 @@ function normalizeMembers(members) {
 
 async function collectContact({ botId, rawContact, type, light, includeNotes, signal }) {
   const contact = normalizeContact(rawContact, type);
-  // A light row (a chat outside a period Sync's window) carries the contact-list data and, for a
-  // group, its member list — no history and no notes, the two downloads the rate limit governs.
+  // A light row (a chat outside a period Sync's window, or any chat of a Sync with Messages off)
+  // carries the contact-list data and, for a group, its member list — no history, the download the
+  // rate limit governs most. Its notes come only when planned with them: a Sync with Messages off and
+  // Notes on downloads them for chats inside its period; a chat outside the period never gets them.
   if (contact.chatExists && light) {
-    const members =
+    const [notes, members] = await Promise.all([
+      includeNotes
+        ? fetchChatNotes(botId, contact.chatId, { signal })
+        : Promise.resolve([]),
       type === "GROUP"
-        ? await fetchChatMembers(botId, contact.chatId, { signal })
-        : null;
+        ? fetchChatMembers(botId, contact.chatId, { signal })
+        : Promise.resolve(null),
+    ]);
+    if (!Array.isArray(notes)) throw new Error("LINE_OAM_NOTES_INVALID");
     return {
       ...contact,
       csv: null,
       historyComplete: false,
-      notes: [],
-      notesComplete: false,
+      notes,
+      notesComplete: includeNotes,
       ...(type === "GROUP"
         ? { members: normalizeMembers(members), rosterComplete: true }
         : {}),
@@ -213,7 +220,7 @@ async function collectContact({ botId, rawContact, type, light, includeNotes, si
  * passes through oam-api's authoritative network limiter; the final fold preserves source order
  * regardless of which download finishes first.
  */
-async function collectPlanned({ planned, botId, includeNotes }) {
+async function collectPlanned({ planned, botId }) {
   let firstError = null;
   const controller = new AbortController();
 
@@ -225,8 +232,8 @@ async function collectPlanned({ planned, botId, includeNotes }) {
           botId,
           rawContact: entry.rawContact,
           type: entry.type,
-          light: entry.outsidePeriod,
-          includeNotes,
+          light: entry.light,
+          includeNotes: entry.includeNotes,
           signal: controller.signal,
         });
         entry.fetched = true;
@@ -332,6 +339,7 @@ export async function scrapeOam({
   cursor = null,
   includeTagCatalog = false,
   since = null,
+  includeHistory = true,
   includeNotes = true,
   includePresets = false,
   catalogueOnly = false,
@@ -469,10 +477,15 @@ export async function scrapeOam({
           typeof rawContact.lastTalkedAt === "number" &&
           rawContact.lastTalkedAt >= since
         );
-      planned.push({ type, rawContact, outsidePeriod });
+      // A Sync with Messages off (includeHistory false) sends every chat as a light row.
+      const light = type !== "ROOM" && (includeHistory === false || outsidePeriod);
+      // The period limits both per-chat downloads: notes come only for chats inside it (every chat when
+      // there is no period), in every run.
+      const withNotes = includeNotes !== false && !outsidePeriod;
+      planned.push({ type, rawContact, light, includeNotes: withNotes });
     }
 
-    await collectPlanned({ planned, botId, includeNotes: includeNotes !== false });
+    await collectPlanned({ planned, botId });
 
     // Fold results back in source order so the staged payload and acknowledged cursor are stable even
     // though the per-contact requests completed concurrently.

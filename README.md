@@ -10,7 +10,10 @@ option, "Message presets", makes the first batch of a Sync also carry the OA's s
 title, text, emojis, favourite and list position), which PropertyOS keeps as that account's message
 presets; without it the saved replies are not read at all. Since 0.4.21 the Chat presets card's
 "Sync from LINE OA" button asks for the saved replies alone (`catalogueOnly`): one batch with no
-contacts, so no chat, note or tag is downloaded.
+contacts, so no chat, note or tag is downloaded. Since 0.4.23 a Sync with the dialog's "Messages"
+option off (`includeHistory: false`) downloads no chat history: every chat is sent with its
+contact-list data, tags, Follow-up and (for a group) its member list, plus its notes when "Notes" is
+on and the chat is inside the Sync's period (every chat when there is none).
 
 ## Install (developer mode)
 
